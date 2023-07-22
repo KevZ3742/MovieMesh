@@ -5,7 +5,6 @@ import requests
 
 load_dotenv()
 
-
 def formatParameters(name, value):
     '''Checks for a value and formats it for a given parameter'''
     if value:
