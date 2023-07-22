@@ -24,6 +24,7 @@ def prettyPrint(str, indention):
         return str.text
 
 def getActorId(name):
+    '''Returns the specified actor's Id'''
     searchUrl = f'{os.getenv("BASE_URL")}search/person'
     params = {
         'api_key': os.getenv("API_KEY"),
@@ -42,6 +43,7 @@ def getActorId(name):
         raise ValueError(f"Failed to fetch actor details. Status code: {response.status_code}")
 
 def getActorCredits(id):
+    '''Returns list of evey movie/TV show the specified actor has played in'''
     creditsUrl = f'{os.getenv("BASE_URL")}person/{id}/combined_credits'
     params = {
         'api_key': os.getenv("API_KEY")
@@ -56,6 +58,7 @@ def getActorCredits(id):
         raise ValueError(f"Failed to fetch actor credits. Status code: {response.status_code}")
 
 def listActorMoviesAndTvShows(name):
+    '''Prints a list of every movie/TV show the specified actor has played in'''
     try:
         id = getActorId(name)
         credits = getActorCredits(id)
