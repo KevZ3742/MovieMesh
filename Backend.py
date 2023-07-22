@@ -15,13 +15,16 @@ include_adult = formatParameters("include_adult", include_adult)
 language = formatParameters("language", language)
 page = formatParameters("page", page)
 
-url = "https://api.themoviedb.org/3/search/multi?" + query + "&" + include_adult + "&" + language + "&" +  page
+url = os.getenv("BASE_URL") + "search/multi?" + query + "&" + include_adult + "&" + language + "&" +  page
 
 headers = {
     "accept": "application/json",
-    "Authorization": os.getenv("accessTokenAuth")
+    "Authorization": os.getenv("Access_Token_Auth")
 }
 
 response = requests.get(url, headers=headers)
 
 print(prettyPrint(response, 2))
+
+data = response.json()
+print(data["results"][0]["media_type"])

@@ -1,4 +1,10 @@
+from dotenv import load_dotenv
+import os
 import json
+import requests
+
+load_dotenv()
+
 
 def formatParameters(name, value):
     '''Checks for a value and formats it for a given parameter'''
@@ -16,3 +22,47 @@ def prettyPrint(str, indention):
     except json.JSONDecodeError:
         print("Failed to parse response as JSON.")
         return str.text
+
+def getActorId(name):
+    searchUrl = f'{os.getenv("BASE_URL")}search/person'
+    params = {
+        'api_key': os.getenv("API_KEY"),
+        'query': name
+    }
+
+    response = requests.get(searchUrl, params=params)
+
+    if response.status_code == 200:
+        data = response.json()
+        if data['results']:
+            return data['results'][0]['id']
+        else:
+            raise ValueError(f"Actor '{name}' not found.")
+    else:
+        raise ValueError(f"Failed to fetch actor details. Status code: {response.status_code}")
+
+def getActorCredits(id):
+    creditsUrl = f'{os.getenv("BASE_URL")}person/{id}/combined_credits'
+    params = {
+        'api_key': os.getenv("API_KEY")
+    }
+
+    response = requests.get(creditsUrl, params=params)
+
+    if response.status_code == 200:
+        data = response.json()
+        return data['cast']
+    else:
+        raise ValueError(f"Failed to fetch actor credits. Status code: {response.status_code}")
+
+def listActorMoviesAndTvShows(name):
+    try:
+        id = getActorId(name)
+        credits = getActorCredits(id)
+
+        print(f"Movies and TV shows {name} has played in:")
+        for credit in credits:
+            title = credit['title'] if 'title' in credit else credit['name']
+            print(f"- {title} ({credit['media_type']})")
+    except ValueError as e:
+        print(e)
