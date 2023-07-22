@@ -1,6 +1,7 @@
 from dotenv import load_dotenv
 import os
 import requests
+from utils import *
 
 load_dotenv()
 
@@ -8,13 +9,6 @@ query = input("query: ")
 include_adult = input("include_adult: ")
 language = input("language: ")
 page = input("page: ")
-
-def formatParameters(name, value):
-    '''Checks for a value and formats it for a given parameter'''
-    if value:
-        return f"{name}={value.replace(' ', '%20')}"
-    else:
-        return ""
 
 query = formatParameters("query", query)
 include_adult = formatParameters("include_adult", include_adult)
@@ -31,4 +25,4 @@ headers = {
 
 response = requests.get(url, headers=headers)
 
-print(response.text)
+print(prettyPrint(response, 2))
