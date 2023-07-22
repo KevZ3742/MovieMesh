@@ -15,7 +15,6 @@ include_adult = formatParameters("include_adult", include_adult)
 language = formatParameters("language", language)
 page = formatParameters("page", page)
 
-
 url = "https://api.themoviedb.org/3/search/multi?" + query + "&" + include_adult + "&" + language + "&" +  page
 
 headers = {
