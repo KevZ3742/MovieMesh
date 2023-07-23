@@ -25,7 +25,7 @@ headers = {
 response = requests.get(url, headers=headers)
 data = response.json()
 
-print(prettyPrint(response, 2))
+print(cleanedPrettyPrint(response, 2))
 print(data["results"][0]["media_type"])
 
 if data["results"][0]["media_type"] == "person":

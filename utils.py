@@ -21,6 +21,28 @@ def prettyPrint(str, indention):
     except json.JSONDecodeError:
         print("Failed to parse response as JSON.")
         return str.text
+    
+def cleanedPrettyPrint(str, indention):
+    '''Returns an easy to read json string with only relevent information'''
+    try:
+        allowedKeys = ["media_type", "name", "title", "id", "overview"]
+        data = str.json()
+        results = data["results"]
+
+        filteredData = []
+        for result in results:
+            filteredResults = {}
+            for key in allowedKeys:
+                if key in result:
+                    filteredResults[key] = result[key]
+            filteredData.append(filteredResults)
+
+        data["results"] = filteredData
+        jsonStr = json.dumps(data, indent=indention)
+        return jsonStr
+    except json.JSONDecodeError:
+        print("Failed to parse response as JSON.")
+        return str.text
 
 def getActorId(name):
     '''Returns the specified actor's Id'''
