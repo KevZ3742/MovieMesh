@@ -23,8 +23,14 @@ headers = {
 }
 
 response = requests.get(url, headers=headers)
+data = response.json()
 
 print(prettyPrint(response, 2))
-
-data = response.json()
 print(data["results"][0]["media_type"])
+
+if data["results"][0]["media_type"] == "person":
+    listActorMoviesAndTvShows(data["results"][0]["name"])
+elif data["results"][0]["media_type"] == "movie":
+    listActorsInMovieOrTvShow(data["results"][0]["title"], data["results"][0]["media_type"])
+elif data["results"][0]["media_type"] == "tv":
+    listActorsInMovieOrTvShow(data["results"][0]["name"], data["results"][0]["media_type"])

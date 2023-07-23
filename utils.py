@@ -68,3 +68,51 @@ def listActorMoviesAndTvShows(name):
             print(f"- {title} ({credit['media_type']})")
     except ValueError as e:
         print(e)
+
+def getMovieOrTvShowId(title, media_type='movie'):
+    '''Returns the specified movie/TV show's ID'''
+    searchUrl = f'{os.getenv("BASE_URL")}search/{media_type}'
+    params = {
+        'api_key': os.getenv("API_KEY"),
+        'query': title
+    }
+
+    response = requests.get(searchUrl, params=params)
+
+    if response.status_code == 200:
+        data = response.json()
+        if data['results']:
+            return data['results'][0]['id']
+        else:
+            raise ValueError(f"{media_type.capitalize()} '{title}' not found.")
+    else:
+        raise ValueError(f"Failed to fetch {media_type} details. Status code: {response.status_code}")
+
+def getMovieOrTvShowCredits(media_type, media_id):
+    '''Returns list of every actor that played in a specified movie/TV show'''
+    creditsUrl = f'{os.getenv("BASE_URL")}{media_type}/{media_id}/credits'
+    params = {
+        'api_key': os.getenv("API_KEY")
+    }
+
+    response = requests.get(creditsUrl, params=params)
+
+    if response.status_code == 200:
+        data = response.json()
+        return data['cast']
+    else:
+        raise ValueError(f"Failed to fetch {media_type} credits. Status code: {response.status_code}")
+
+def listActorsInMovieOrTvShow(title, media_type):
+    '''Prints a list of every actors that played in a specified movie/TV show'''
+    try:
+        mediaId = getMovieOrTvShowId(title, media_type)
+        credits = getMovieOrTvShowCredits(media_type, mediaId)
+
+        print(f"Actors in '{title}' ({media_type}):")
+        for actor in credits:
+            actorName = actor['name']
+            characterName = actor['character']
+            print(f"- {actorName} as {characterName}")
+    except ValueError as e:
+        print(e)
