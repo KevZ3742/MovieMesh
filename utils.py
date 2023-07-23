@@ -48,21 +48,17 @@ def cleanedPrettyPrint(str, indention):
     
 def cleanData(data):
     '''Returns a json string with only relevent information'''
-    try:
-        allowedKeys = ["media_type", "name", "title", "id", "character"]
+    allowedKeys = ["media_type", "name", "title", "id", "character"]
 
-        filteredData = []
-        for obj in data:
-            filteredResults = {}
-            for key in allowedKeys:
-                if key in obj:
-                    filteredResults[key] = obj[key]
-            filteredData.append(filteredResults)
+    filteredData = []
+    for obj in data:
+        filteredResults = {}
+        for key in allowedKeys:
+            if key in obj:
+                filteredResults[key] = obj[key]
+        filteredData.append(filteredResults)
 
-        return filteredData
-    except json.JSONDecodeError:
-        print("Failed to parse response as JSON.")
-        return str.text
+    return filteredData
 
 def getActorCredits(id):
     '''Returns list of evey movie/TV show the specified actor has played in'''
