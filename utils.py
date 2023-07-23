@@ -2,7 +2,6 @@ from dotenv import load_dotenv
 import os
 import json
 import requests
-import time
 
 load_dotenv()
 
@@ -46,6 +45,24 @@ def cleanedPrettyPrint(str, indention):
     except json.JSONDecodeError:
         print("Failed to parse response as JSON.")
         return str.text
+    
+def cleanData(data):
+    '''Returns a json string with only relevent information'''
+    try:
+        allowedKeys = ["media_type", "name", "title", "id", "character"]
+
+        filteredData = []
+        for obj in data:
+            filteredResults = {}
+            for key in allowedKeys:
+                if key in obj:
+                    filteredResults[key] = obj[key]
+            filteredData.append(filteredResults)
+
+        return filteredData
+    except json.JSONDecodeError:
+        print("Failed to parse response as JSON.")
+        return str.text
 
 def getActorCredits(id):
     '''Returns list of evey movie/TV show the specified actor has played in'''
@@ -58,7 +75,8 @@ def getActorCredits(id):
 
     if response.status_code == 200:
         data = response.json()
-        return data['cast']
+        data = cleanData(data["cast"])
+        return data
     else:
         raise ValueError(f"Failed to fetch actor credits. Status code: {response.status_code}")
 
@@ -73,7 +91,8 @@ def getMovieOrTvShowCredits(media_type, media_id):
 
     if response.status_code == 200:
         data = response.json()
-        return data['cast']
+        data = cleanData(data["cast"])
+        return data
     else:
         raise ValueError(f"Failed to fetch {media_type} credits. Status code: {response.status_code}")
 
@@ -110,8 +129,6 @@ def nodeSelection(data):
     '''Displays connections between actors and the movies'''
     selection = input("Selection (int): ")
 
-    start = time.time()
-
     if not selection.isdigit():
         exit()
     else:
@@ -121,11 +138,23 @@ def nodeSelection(data):
     cast = []
 
     if data["media_type"] == "person":
-        moviesAndShows = getActorCredits(data["id"])
+        if (data["name"], data["id"], data["media_type"]) in fetched:
+            moviesAndShows = fetched[(data["name"], data["id"], data["media_type"])]
+        else:
+            moviesAndShows = getActorCredits(data["id"])
+            fetched[(data["name"], data["id"], data["media_type"])] = moviesAndShows
     elif data["media_type"] == "movie":
-        cast = getMovieOrTvShowCredits(data["media_type"], data["id"])
+        if (data["title"], data["id"], data["media_type"]) in fetched:
+            cast = fetched[(data["title"], data["id"], data["media_type"])]
+        else:
+            cast = getMovieOrTvShowCredits(data["media_type"], data["id"])
+            fetched[(data["title"], data["id"], data["media_type"])] = cast
     elif data["media_type"] == "tv":
-        cast = getMovieOrTvShowCredits(data["media_type"], data["id"])
+        if (data["name"], data["id"], data["media_type"]) in fetched:
+            cast = fetched[(data["name"], data["id"], data["media_type"])]
+        else:
+            cast = getMovieOrTvShowCredits(data["media_type"], data["id"])
+            fetched[(data["name"], data["id"], data["media_type"])] = cast
 
     if moviesAndShows == []:
         data = cast[selection]
@@ -137,8 +166,5 @@ def nodeSelection(data):
             listActorsInMovieOrTvShow(data["title"], data["id"], data["media_type"])
         elif data["media_type"] == "tv":
             listActorsInMovieOrTvShow(data["name"], data["id"], data["media_type"])
-    
-    end = time.time()
-    print("Runtime: ", (end-start) * 10**3, "ms")
 
     nodeSelection(data)
