@@ -2,8 +2,11 @@ from dotenv import load_dotenv
 import os
 import json
 import requests
+import time
 
 load_dotenv()
+
+fetched = {}
 
 def formatParameters(name, value):
     '''Checks for a value and formats it for a given parameter'''
@@ -59,20 +62,6 @@ def getActorCredits(id):
     else:
         raise ValueError(f"Failed to fetch actor credits. Status code: {response.status_code}")
 
-def listActorMoviesAndTvShows(name, id):
-    '''Prints a list of every movie/TV show the specified actor has played in'''
-    try:
-        credits = getActorCredits(id)
-
-        print(f"Movies and TV shows {name} (ID: {id}) has played in:")
-        counter = 1
-        for credit in credits:
-            title = credit['title'] if 'title' in credit else credit['name']
-            print(f"{counter} - {title} ({credit['media_type']})")
-            counter += 1
-    except ValueError as e:
-        print(e)
-
 def getMovieOrTvShowCredits(media_type, media_id):
     '''Returns list of every actor that played in a specified movie/TV show'''
     creditsUrl = f'{os.getenv("BASE_URL")}{media_type}/{media_id}/credits'
@@ -87,6 +76,20 @@ def getMovieOrTvShowCredits(media_type, media_id):
         return data['cast']
     else:
         raise ValueError(f"Failed to fetch {media_type} credits. Status code: {response.status_code}")
+
+def listActorMoviesAndTvShows(name, id):
+    '''Prints a list of every movie/TV show the specified actor has played in'''
+    try:
+        credits = getActorCredits(id)
+
+        print(f"Movies and TV shows {name} (ID: {id}) has played in:")
+        counter = 1
+        for credit in credits:
+            title = credit['title'] if 'title' in credit else credit['name']
+            print(f"{counter} - {title} ({credit['media_type']})")
+            counter += 1
+    except ValueError as e:
+        print(e)
 
 def listActorsInMovieOrTvShow(title, id, media_type):
     '''Prints a list of every actors that played in a specified movie/TV show'''
@@ -104,7 +107,10 @@ def listActorsInMovieOrTvShow(title, id, media_type):
         print(e)
 
 def nodeSelection(data):
+    '''Displays connections between actors and the movies'''
     selection = input("Selection (int): ")
+
+    start = time.time()
 
     if not selection.isdigit():
         exit()
@@ -132,4 +138,7 @@ def nodeSelection(data):
         elif data["media_type"] == "tv":
             listActorsInMovieOrTvShow(data["name"], data["id"], data["media_type"])
     
+    end = time.time()
+    print("Runtime: ", (end-start) * 10**3, "ms")
+
     nodeSelection(data)
