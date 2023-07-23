@@ -119,6 +119,7 @@ def nodeSelection(data):
 
     if moviesAndShows == []:
         data = cast[selection]
+        data["media_type"] = "person"
         listActorMoviesAndTvShows(data["name"], data["id"])
     elif cast == []:
         data = moviesAndShows[selection]
@@ -126,3 +127,5 @@ def nodeSelection(data):
             listActorsInMovieOrTvShow(data["title"], data["id"], data["media_type"])
         elif data["media_type"] == "tv":
             listActorsInMovieOrTvShow(data["name"], data["id"], data["media_type"])
+    
+    nodeSelection(data)
