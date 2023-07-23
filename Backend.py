@@ -27,7 +27,12 @@ data = response.json()
 
 print(cleanedPrettyPrint(response, 2))
 
-selection = int(input("Select (int): "))
+selection = input("Select (int): ")
+
+if not selection.isdigit():
+    exit()
+else:
+    selection = int(selection)
 
 if data["results"][selection]["media_type"] == "person":
     listActorMoviesAndTvShows(data["results"][selection]["name"], data["results"][selection]["id"])
@@ -35,3 +40,5 @@ elif data["results"][selection]["media_type"] == "movie":
     listActorsInMovieOrTvShow(data["results"][selection]["title"], data["results"][selection]["id"], data["results"][selection]["media_type"])
 elif data["results"][selection]["media_type"] == "tv":
     listActorsInMovieOrTvShow(data["results"][selection]["name"], data["results"][selection]["id"], data["results"][selection]["media_type"])
+
+nodeSelection(data["results"][selection])

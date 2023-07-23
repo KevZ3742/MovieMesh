@@ -98,3 +98,31 @@ def listActorsInMovieOrTvShow(title, id, media_type):
             print(f"- {actorName} as {characterName}")
     except ValueError as e:
         print(e)
+
+def nodeSelection(data):
+    selection = input("Selection (int): ")
+
+    if not selection.isdigit():
+        exit()
+    else:
+        selection = int(selection)
+
+    moviesAndShows = []
+    cast = []
+
+    if data["media_type"] == "person":
+        moviesAndShows = getActorCredits(data["id"])
+    elif data["media_type"] == "movie":
+        cast = getMovieOrTvShowCredits(data["media_type"], data["id"])
+    elif data["media_type"] == "tv":
+        cast = getMovieOrTvShowCredits(data["media_type"], data["id"])
+
+    if moviesAndShows == []:
+        data = cast[selection]
+        listActorMoviesAndTvShows(data["name"], data["id"])
+    elif cast == []:
+        data = moviesAndShows[selection]
+        if data["media_type"] == "movie":
+            listActorsInMovieOrTvShow(data["title"], data["id"], data["media_type"])
+        elif data["media_type"] == "tv":
+            listActorsInMovieOrTvShow(data["name"], data["id"], data["media_type"])
