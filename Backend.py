@@ -5,10 +5,10 @@ from utils import *
 
 load_dotenv()
 
-query = input("query: ")
-include_adult = input("include_adult: ")
-language = input("language: ")
-page = input("page: ")
+query = input("query (str): ")
+include_adult = input("include_adult (bool): ")
+language = input("language (str): ")
+page = input("page (int): ")
 
 query = formatParameters("query", query)
 include_adult = formatParameters("include_adult", include_adult)
@@ -26,11 +26,12 @@ response = requests.get(url, headers=headers)
 data = response.json()
 
 print(cleanedPrettyPrint(response, 2))
-print(data["results"][0]["media_type"])
 
-if data["results"][0]["media_type"] == "person":
-    listActorMoviesAndTvShows(data["results"][0]["name"])
-elif data["results"][0]["media_type"] == "movie":
-    listActorsInMovieOrTvShow(data["results"][0]["title"], data["results"][0]["media_type"])
-elif data["results"][0]["media_type"] == "tv":
-    listActorsInMovieOrTvShow(data["results"][0]["name"], data["results"][0]["media_type"])
+selection = int(input("Select (int): "))
+
+if data["results"][selection]["media_type"] == "person":
+    listActorMoviesAndTvShows(data["results"][selection]["name"], data["results"][selection]["id"])
+elif data["results"][selection]["media_type"] == "movie":
+    listActorsInMovieOrTvShow(data["results"][selection]["title"], data["results"][selection]["id"], data["results"][selection]["media_type"])
+elif data["results"][selection]["media_type"] == "tv":
+    listActorsInMovieOrTvShow(data["results"][selection]["name"], data["results"][selection]["id"], data["results"][selection]["media_type"])

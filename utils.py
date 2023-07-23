@@ -44,25 +44,6 @@ def cleanedPrettyPrint(str, indention):
         print("Failed to parse response as JSON.")
         return str.text
 
-def getActorId(name):
-    '''Returns the specified actor's Id'''
-    searchUrl = f'{os.getenv("BASE_URL")}search/person'
-    params = {
-        'api_key': os.getenv("API_KEY"),
-        'query': name
-    }
-
-    response = requests.get(searchUrl, params=params)
-
-    if response.status_code == 200:
-        data = response.json()
-        if data['results']:
-            return data['results'][0]['id']
-        else:
-            raise ValueError(f"Actor '{name}' not found.")
-    else:
-        raise ValueError(f"Failed to fetch actor details. Status code: {response.status_code}")
-
 def getActorCredits(id):
     '''Returns list of evey movie/TV show the specified actor has played in'''
     creditsUrl = f'{os.getenv("BASE_URL")}person/{id}/combined_credits'
@@ -78,37 +59,17 @@ def getActorCredits(id):
     else:
         raise ValueError(f"Failed to fetch actor credits. Status code: {response.status_code}")
 
-def listActorMoviesAndTvShows(name):
+def listActorMoviesAndTvShows(name, id):
     '''Prints a list of every movie/TV show the specified actor has played in'''
     try:
-        id = getActorId(name)
         credits = getActorCredits(id)
 
-        print(f"Movies and TV shows {name} has played in:")
+        print(f"Movies and TV shows {name} (ID: {id}) has played in:")
         for credit in credits:
             title = credit['title'] if 'title' in credit else credit['name']
             print(f"- {title} ({credit['media_type']})")
     except ValueError as e:
         print(e)
-
-def getMovieOrTvShowId(title, media_type='movie'):
-    '''Returns the specified movie/TV show's ID'''
-    searchUrl = f'{os.getenv("BASE_URL")}search/{media_type}'
-    params = {
-        'api_key': os.getenv("API_KEY"),
-        'query': title
-    }
-
-    response = requests.get(searchUrl, params=params)
-
-    if response.status_code == 200:
-        data = response.json()
-        if data['results']:
-            return data['results'][0]['id']
-        else:
-            raise ValueError(f"{media_type.capitalize()} '{title}' not found.")
-    else:
-        raise ValueError(f"Failed to fetch {media_type} details. Status code: {response.status_code}")
 
 def getMovieOrTvShowCredits(media_type, media_id):
     '''Returns list of every actor that played in a specified movie/TV show'''
@@ -125,13 +86,12 @@ def getMovieOrTvShowCredits(media_type, media_id):
     else:
         raise ValueError(f"Failed to fetch {media_type} credits. Status code: {response.status_code}")
 
-def listActorsInMovieOrTvShow(title, media_type):
+def listActorsInMovieOrTvShow(title, id, media_type):
     '''Prints a list of every actors that played in a specified movie/TV show'''
     try:
-        mediaId = getMovieOrTvShowId(title, media_type)
-        credits = getMovieOrTvShowCredits(media_type, mediaId)
+        credits = getMovieOrTvShowCredits(media_type, id)
 
-        print(f"Actors in '{title}' ({media_type}):")
+        print(f"Actors in '{title}' (ID: {id}) ({media_type}):")
         for actor in credits:
             actorName = actor['name']
             characterName = actor['character']
