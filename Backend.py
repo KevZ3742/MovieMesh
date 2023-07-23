@@ -32,7 +32,7 @@ selection = input("Select (int): ")
 if not selection.isdigit():
     exit()
 else:
-    selection = int(selection)
+    selection = int(selection) - 1
 
 if data["results"][selection]["media_type"] == "person":
     listActorMoviesAndTvShows(data["results"][selection]["name"], data["results"][selection]["id"])

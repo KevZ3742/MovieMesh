@@ -65,9 +65,11 @@ def listActorMoviesAndTvShows(name, id):
         credits = getActorCredits(id)
 
         print(f"Movies and TV shows {name} (ID: {id}) has played in:")
+        counter = 1
         for credit in credits:
             title = credit['title'] if 'title' in credit else credit['name']
-            print(f"- {title} ({credit['media_type']})")
+            print(f"{counter} - {title} ({credit['media_type']})")
+            counter += 1
     except ValueError as e:
         print(e)
 
@@ -92,10 +94,12 @@ def listActorsInMovieOrTvShow(title, id, media_type):
         credits = getMovieOrTvShowCredits(media_type, id)
 
         print(f"Actors in '{title}' (ID: {id}) ({media_type}):")
+        counter = 1
         for actor in credits:
             actorName = actor['name']
             characterName = actor['character']
-            print(f"- {actorName} as {characterName}")
+            print(f"{counter} - {actorName} as {characterName}")
+            counter += 1
     except ValueError as e:
         print(e)
 
@@ -105,7 +109,7 @@ def nodeSelection(data):
     if not selection.isdigit():
         exit()
     else:
-        selection = int(selection)
+        selection = int(selection) - 1
 
     moviesAndShows = []
     cast = []
