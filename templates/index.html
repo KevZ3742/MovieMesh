@@ -9,6 +9,20 @@
     <script src='main.js'></script> -->
 </head>
 <body>
-    <div><h1>Home Page</h1></div>
+    <form id="inputs">
+        <div>
+            <label for="query">Query:</label>
+            <input type="text" id="query" name="query" placeholder="Movie, TV Show, or Actor" required>
+        </div>
+        <br>
+        <div>
+            <input type="submit">
+            <input type="reset">
+        </div>
+        <br>
+        <div>
+            <p>you submitted: {{ query }}</p>
+        </div>
+    </form>
 </body>
 </html>
