@@ -1,0 +1,15 @@
+/* Styling for the drop-down list */
+#search-results {
+    display: none;
+    border: 1px solid #ccc;
+    padding: 5px;
+    position: absolute;
+    background-color: #fff;
+    width: 200px;
+  }
+  
+  #search-results li {
+    list-style-type: none;
+    cursor: pointer;
+  }
+  
