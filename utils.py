@@ -5,7 +5,8 @@ import requests
 
 load_dotenv()
 
-fetched = {}
+cache = {}
+allowedKeys = ["media_type", "name", "title", "id", "overview", "release_date", "poster_path"]
 
 def formatParameters(name, value):
     '''Checks for a value and formats it for a given parameter'''
@@ -27,7 +28,6 @@ def prettyPrint(str, indention):
 def cleanedPrettyPrint(str, indention):
     '''Returns an easy to read json string with only relevent information'''
     try:
-        allowedKeys = ["media_type", "name", "title", "id", "overview"]
         data = str.json()
         results = data["results"]
 
@@ -48,8 +48,6 @@ def cleanedPrettyPrint(str, indention):
     
 def cleanData(data):
     '''Returns a json string with only relevent information'''
-    allowedKeys = ["media_type", "name", "title", "id", "character"]
-
     filteredData = []
     for obj in data:
         filteredResults = {}
@@ -134,23 +132,23 @@ def nodeSelection(data):
     cast = []
 
     if data["media_type"] == "person":
-        if (data["name"], data["id"], data["media_type"]) in fetched:
-            moviesAndShows = fetched[(data["name"], data["id"], data["media_type"])]
+        if (data["name"], data["id"], data["media_type"]) in cache:
+            moviesAndShows = cache[(data["name"], data["id"], data["media_type"])]
         else:
             moviesAndShows = getActorCredits(data["id"])
-            fetched[(data["name"], data["id"], data["media_type"])] = moviesAndShows
+            cache[(data["name"], data["id"], data["media_type"])] = moviesAndShows
     elif data["media_type"] == "movie":
-        if (data["title"], data["id"], data["media_type"]) in fetched:
-            cast = fetched[(data["title"], data["id"], data["media_type"])]
+        if (data["title"], data["id"], data["media_type"]) in cache:
+            cast = cache[(data["title"], data["id"], data["media_type"])]
         else:
             cast = getMovieOrTvShowCredits(data["media_type"], data["id"])
-            fetched[(data["title"], data["id"], data["media_type"])] = cast
+            cache[(data["title"], data["id"], data["media_type"])] = cast
     elif data["media_type"] == "tv":
-        if (data["name"], data["id"], data["media_type"]) in fetched:
-            cast = fetched[(data["name"], data["id"], data["media_type"])]
+        if (data["name"], data["id"], data["media_type"]) in cache:
+            cast = cache[(data["name"], data["id"], data["media_type"])]
         else:
             cast = getMovieOrTvShowCredits(data["media_type"], data["id"])
-            fetched[(data["name"], data["id"], data["media_type"])] = cast
+            cache[(data["name"], data["id"], data["media_type"])] = cast
 
     if moviesAndShows == []:
         data = cast[selection]

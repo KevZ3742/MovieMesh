@@ -25,7 +25,7 @@ headers = {
 response = requests.get(url, headers=headers)
 data = response.json()
 
-print(cleanedPrettyPrint(response, 2))
+print(prettyPrint(response, 2))
 
 selection = input("Select (int): ")
 
