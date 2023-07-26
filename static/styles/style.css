@@ -14,3 +14,9 @@
   list-style-type: none;
   cursor: pointer;
 }
+
+#search-results li img {
+  width: 30px;
+  height: 30px;
+  margin-right: 5px;
+}

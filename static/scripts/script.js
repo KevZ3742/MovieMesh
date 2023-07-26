@@ -1,86 +1,17 @@
 // Test data
 const data = [
-    "Apple",
-    "Banana",
-    "Cherry",
-    "Grapes",
-    "Lemon",
-    "Orange",
-    "Peach",
-    "Pear",
-    "Strawberry",
-    "Apple",
-    "Banana",
-    "Cherry",
-    "Grapes",
-    "Lemon",
-    "Orange",
-    "Peach",
-    "Pear",
-    "Strawberry",
-    "Apple",
-    "Banana",
-    "Cherry",
-    "Grapes",
-    "Lemon",
-    "Orange",
-    "Peach",
-    "Pear",
-    "Strawberry",
-    "Apple",
-    "Banana",
-    "Cherry",
-    "Grapes",
-    "Lemon",
-    "Orange",
-    "Peach",
-    "Pear",
-    "Strawberry",
-    "Apple",
-    "Banana",
-    "Cherry",
-    "Grapes",
-    "Lemon",
-    "Orange",
-    "Peach",
-    "Pear",
-    "Strawberry",
-    "Apple",
-    "Banana",
-    "Cherry",
-    "Grapes",
-    "Lemon",
-    "Orange",
-    "Peach",
-    "Pear",
-    "Strawberry",
-    "Apple",
-    "Banana",
-    "Cherry",
-    "Grapes",
-    "Lemon",
-    "Orange",
-    "Peach",
-    "Pear",
-    "Strawberry",
-    "Apple",
-    "Banana",
-    "Cherry",
-    "Grapes",
-    "Lemon",
-    "Orange",
-    "Peach",
-    "Pear",
-    "Strawberry",
-    "Apple",
-    "Banana",
-    "Cherry",
-    "Grapes",
-    "Lemon",
-    "Orange",
-    "Peach",
-    "Pear",
-    "Strawberry",
+    {
+        imgSrc: "temp1.jpg",
+        text: "Apple",
+    },
+    {
+        imgSrc: "temp2.jpg",
+        text: "Banana",
+    },
+    {
+        imgSrc: "temp3.jpg",
+        text: "Cherry",
+    },
 ];
 
 const searchInput = document.getElementById("search-input");
@@ -89,14 +20,21 @@ const searchResults = document.getElementById("search-results");
 function updateResults() {
     const query = searchInput.value.toLowerCase();
     const filteredData = data.filter(item =>
-        item.toLowerCase().includes(query)
+        item.text.toLowerCase().includes(query)
     );
 
     searchResults.innerHTML = "";
 
     filteredData.forEach(item => {
         const li = document.createElement("li");
-        li.textContent = item;
+        const img = document.createElement("img");
+        img.src = item.imgSrc;
+        li.appendChild(img);
+
+        const span = document.createElement("span");
+        span.textContent = item.text;
+        li.appendChild(span);
+
         searchResults.appendChild(li);
     });
 
@@ -111,7 +49,8 @@ searchInput.addEventListener("input", updateResults);
 
 searchResults.addEventListener("click", event => {
     if (event.target.tagName === "LI") {
-        searchInput.value = event.target.textContent;
+        const selectedText = event.target.textContent.trim();
+        searchInput.value = selectedText;
         searchResults.style.display = "none";
     }
-});
+});  
