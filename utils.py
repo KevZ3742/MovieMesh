@@ -6,7 +6,6 @@ import requests
 load_dotenv()
 
 cache = {}
-allowedKeys = ["media_type", "name", "title", "id", "overview", "release_date", "poster_path"]
 
 def formatParameters(name, value):
     '''Checks for a value and formats it for a given parameter'''
@@ -27,27 +26,21 @@ def prettyPrint(str, indention):
     
 def cleanedPrettyPrint(str, indention):
     '''Returns an easy to read json string with only relevent information'''
+    allowedKeys = ["media_type", "name", "title", "id", "overview", "release_date", "poster_path"]
+
     try:
         data = str.json()
         results = data["results"]
 
-        filteredData = []
-        for result in results:
-            filteredResults = {}
-            for key in allowedKeys:
-                if key in result:
-                    filteredResults[key] = result[key]
-            filteredData.append(filteredResults)
-
-        data["results"] = filteredData
+        data["results"] = dataCleaner(results, allowedKeys)
         jsonStr = json.dumps(data, indent=indention)
         return jsonStr
     except json.JSONDecodeError:
         print("Failed to parse response as JSON.")
         return str.text
-    
-def cleanData(data):
-    '''Returns a json string with only relevent information'''
+
+def dataCleaner(data, allowedKeys):
+    '''Returns a json string with only input information'''
     filteredData = []
     for obj in data:
         filteredResults = {}
@@ -69,7 +62,8 @@ def getActorCredits(id):
 
     if response.status_code == 200:
         data = response.json()
-        data = cleanData(data["cast"])
+        allowedKeys = ["media_type", "name", "title", "id", "overview", "release_date", "poster_path", "character"]
+        data = dataCleaner(data["cast"], allowedKeys)
         return data
     else:
         raise ValueError(f"Failed to fetch actor credits. Status code: {response.status_code}")
@@ -85,7 +79,8 @@ def getMovieOrTvShowCredits(media_type, media_id):
 
     if response.status_code == 200:
         data = response.json()
-        data = cleanData(data["cast"])
+        allowedKeys = ["media_type", "name", "title", "id", "overview", "release_date", "poster_path", "character"]
+        data = dataCleaner(data["cast"], allowedKeys)
         return data
     else:
         raise ValueError(f"Failed to fetch {media_type} credits. Status code: {response.status_code}")
