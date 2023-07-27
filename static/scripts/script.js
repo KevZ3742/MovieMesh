@@ -14,7 +14,7 @@ const data = [
     },
 ];
 
-const searchInput = document.getElementById("search-input");
+const searchInput = document.getElementById("query");
 const searchResults = document.getElementById("search-results");
 
 function updateResults() {

@@ -9,9 +9,10 @@
 </head>
 <body>
     <form id="inputs">
-        <div>
-            <label for="query">Query:</label>
-            <input type="text" id="query" name="query" placeholder="Movie, TV Show, or Actor" required>
+        <label for="query">Query:</label>
+        <div class="search-container">
+            <input type="text" id="query" name="query" placeholder="Movie, TV Show, or Actor" required/>
+            <ul id="search-results"></ul>
         </div>
         <div>
             <label for="include_adult">Include Adult:</label>
@@ -35,11 +36,6 @@
             <p>you submitted: {{ query }}</p>
         </div>
     </form>
-    <br>
-    <div>
-        <input type="text" id="search-input" placeholder="Search..." />
-        <ul id="search-results"></ul>
-    </div>
     <script src="{{ url_for('static',filename='scripts/script.js') }}"></script>
 </body>
 </html>
