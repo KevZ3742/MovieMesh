@@ -12,12 +12,16 @@
   margin: 0;
 }
 
+/* Width of search input box */
+#query {
+  width: 300px;
+}
+
 #search-results li {
   list-style-type: none;
   cursor: pointer;
 }
 
-/* Search result image size */
 #search-results li img {
   width: 30px;
   height: 30px;
