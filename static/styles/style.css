@@ -1,3 +1,35 @@
+body {
+  margin: 0;
+  background-color: #0d1117; /* GitHub dark theme background color */
+  color: #fff; /* GitHub dark theme text color */
+}
+
+.navbar {
+  background-color: #010409; /* Dark gray color for the navbar */
+  overflow: hidden;
+}
+
+.navbar a {
+  float: left;
+  display: block;
+  color: #fff; /* White text color for navbar links */
+  text-align: center;
+  padding: 20px 20px;
+  text-decoration: none;
+}
+
+.navbar a:not(.logo):hover {
+  margin: 13px;
+  background-color: #555; /* Slightly lighter gray on hover */
+  border-radius: 4px;
+  padding: 7px 7px;
+}
+
+.navbar .logo img {
+  height: 30px; /* Adjust the height of the logo as needed */
+  width: auto;
+}
+
 /* Styling for the drop-down list */
 #search-results {
   display: none;
