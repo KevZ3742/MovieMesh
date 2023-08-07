@@ -76,8 +76,21 @@ body {
 }
 
 #search-results li p {
-  margin: 0 0 10px 0;
+  margin: 0;
   color: #666;
+}
+
+#search-results li p.year {
+  margin: 0 0 10px 0;
+}
+
+#search-results li p.overview {
+  display: -webkit-box;
+  -webkit-line-clamp: 5;
+  -webkit-box-orient: vertical;
+  text-overflow: ellipsis;
+  overflow: hidden;
+  margin: 0;
 }
 
 .search-container {

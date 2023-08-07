@@ -70,10 +70,12 @@ async function updateResults() {
       if (year) {
         const pYear = document.createElement("p")
         pYear.textContent = year;
+        pYear.classList.add("year");
         div.appendChild(pYear);
         
         const pOverview = document.createElement("p")
         pOverview.textContent = overview;
+        pOverview.classList.add("overview");
         div.appendChild(pOverview);
       }
 
