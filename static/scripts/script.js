@@ -33,30 +33,30 @@ async function updateResults() {
       let dataType;
       let imgSrc;
       let year;
-  
+
       if (item.media_type === "movie") {
-          dataType = "Movie";
-          imgSrc = `https://image.tmdb.org/t/p/w92${item.poster_path}`;
-          year = item.release_date ? item.release_date.substring(0, 4) : "N/A";
+        dataType = "Movie";
+        imgSrc = `https://image.tmdb.org/t/p/w92${item.poster_path}`;
+        year = item.release_date ? item.release_date.substring(0, 4) : "N/A";
       } else if (item.media_type === "tv") {
-          dataType = "TV Show";
-          imgSrc = `https://image.tmdb.org/t/p/w92${item.poster_path}`;
-          year = item.first_air_date ? item.first_air_date.substring(0, 4) : "N/A";
+        dataType = "TV Show";
+        imgSrc = `https://image.tmdb.org/t/p/w92${item.poster_path}`;
+        year = item.first_air_date ? item.first_air_date.substring(0, 4) : "N/A";
       } else if (item.media_type === "person") {
-          dataType = "Actor";
-          imgSrc = `https://image.tmdb.org/t/p/w92${item.profile_path}`;
-          year = "";
+        dataType = "Actor";
+        imgSrc = `https://image.tmdb.org/t/p/w92${item.profile_path}`;
+        year = "";
       } else {
-          // Unsupported media type, skip
-          return;
+        // Unsupported media type, skip
+        return;
       }
-  
+
       const li = document.createElement("li");
 
       const img = document.createElement("img");
       img.src = imgSrc;
       li.appendChild(img);
-  
+
       const div = document.createElement("div")
 
       const h3 = document.createElement("h3");
@@ -70,9 +70,9 @@ async function updateResults() {
       }
 
       li.appendChild(div)
-  
+
       searchResults.appendChild(li);
-  });  
+    });
 
     searchResults.style.display = "block";
   }, 300);
