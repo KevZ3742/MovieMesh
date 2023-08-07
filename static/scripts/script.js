@@ -91,8 +91,10 @@ async function updateResults() {
 searchInput.addEventListener("input", updateResults);
 
 searchResults.addEventListener("click", event => {
-  if (event.target.tagName === "LI") {
-    const selectedText = event.target.textContent.trim();
+  const clickedLi = event.target.closest("li");
+  
+  if (clickedLi) {
+    const selectedText = clickedLi.querySelector("h3").textContent.trim();
     searchInput.value = selectedText;
     searchResults.style.display = "none";
   }
