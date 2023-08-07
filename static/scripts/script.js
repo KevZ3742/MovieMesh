@@ -33,19 +33,23 @@ async function updateResults() {
       let dataType;
       let imgSrc;
       let year;
+      let overview;
 
       if (item.media_type === "movie") {
         dataType = "Movie";
         imgSrc = `https://image.tmdb.org/t/p/w92${item.poster_path}`;
         year = item.release_date ? item.release_date.substring(0, 4) : "N/A";
+        overview = item.overview
       } else if (item.media_type === "tv") {
         dataType = "TV Show";
         imgSrc = `https://image.tmdb.org/t/p/w92${item.poster_path}`;
         year = item.first_air_date ? item.first_air_date.substring(0, 4) : "N/A";
+        overview = item.overview
       } else if (item.media_type === "person") {
         dataType = "Actor";
         imgSrc = `https://image.tmdb.org/t/p/w92${item.profile_path}`;
         year = "";
+        overview = "";
       } else {
         // Unsupported media type, skip
         return;
@@ -64,9 +68,13 @@ async function updateResults() {
       div.appendChild(h3);
 
       if (year) {
-        const p = document.createElement("p")
-        p.textContent = year;
-        div.appendChild(p);
+        const pYear = document.createElement("p")
+        pYear.textContent = year;
+        div.appendChild(pYear);
+        
+        const pOverview = document.createElement("p")
+        pOverview.textContent = overview;
+        div.appendChild(pOverview);
       }
 
       li.appendChild(div)

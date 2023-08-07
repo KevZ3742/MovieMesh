@@ -76,7 +76,7 @@ body {
 }
 
 #search-results li p {
-  margin: 0;
+  margin: 0 0 10px 0;
   color: #666;
 }
 
