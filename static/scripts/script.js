@@ -34,22 +34,26 @@ async function updateResults() {
       let imgSrc;
       let year;
       let overview;
+      let department;
 
       if (item.media_type === "movie") {
         dataType = "Movie";
         imgSrc = `https://image.tmdb.org/t/p/w92${item.poster_path}`;
         year = item.release_date ? item.release_date.substring(0, 4) : "N/A";
         overview = item.overview
+        department = "";
       } else if (item.media_type === "tv") {
         dataType = "TV Show";
         imgSrc = `https://image.tmdb.org/t/p/w92${item.poster_path}`;
         year = item.first_air_date ? item.first_air_date.substring(0, 4) : "N/A";
         overview = item.overview
+        department = "";
       } else if (item.media_type === "person") {
         dataType = "Actor";
         imgSrc = `https://image.tmdb.org/t/p/w92${item.profile_path}`;
         year = "";
         overview = "";
+        department = item.known_for_department;
       } else {
         // Unsupported media type, skip
         return;
@@ -77,6 +81,11 @@ async function updateResults() {
         pOverview.textContent = overview;
         pOverview.classList.add("overview");
         div.appendChild(pOverview);
+      } else {
+        const pDepartment = document.createElement("p")
+        pDepartment.textContent = department;
+        pDepartment.classList.add("year");
+        div.appendChild(pDepartment);
       }
 
       li.appendChild(div)
