@@ -51,8 +51,11 @@ body {
 }
 
 #search-results li {
+  display: flex;
   list-style-type: none;
   cursor: pointer;
+  align-items: flex-start;
+  margin-bottom: 10px;
 }
 
 /* Search result image size*/
@@ -60,6 +63,21 @@ body {
   width: 100px;
   height: 150px;
   margin-right: 5px;
+}
+
+#search-results li div {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+
+#search-results li h3 {
+  margin: 0 0 10px 0;
+}
+
+#search-results li p {
+  margin: 0;
+  color: #666;
 }
 
 .search-container {

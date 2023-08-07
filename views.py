@@ -29,7 +29,7 @@ def fetch_search_results():
         response.raise_for_status()
         data = response.json().get("results", [])
         
-        allowedKeys = ["media_type", "poster_path", "title", "name", "profile_path"]
+        allowedKeys = ["media_type", "poster_path", "title", "name", "profile_path", "first_air_date", "release_date", "overview"]
         
         return jsonify(dataCleaner(data, allowedKeys))
     except requests.RequestException as e:
