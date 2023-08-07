@@ -1,18 +1,18 @@
 body {
   margin: 0;
-  background-color: #0d1117; /* GitHub dark theme background color */
-  color: #fff; /* GitHub dark theme text color */
+  background-color: #0d1117;
+  color: #fff;
 }
 
 .navbar {
-  background-color: #010409; /* Dark gray color for the navbar */
+  background-color: #010409;
   overflow: hidden;
 }
 
 .navbar a {
   float: left;
   display: block;
-  color: #fff; /* White text color for navbar links */
+  color: #fff;
   text-align: center;
   padding: 20px 20px;
   text-decoration: none;
@@ -20,25 +20,26 @@ body {
 
 .navbar a:not(.logo):hover {
   margin: 13px;
-  background-color: #555; /* Slightly lighter gray on hover */
+  background-color: #555;
   border-radius: 4px;
   padding: 7px 7px;
 }
 
 .navbar .logo img {
-  height: 30px; /* Adjust the height of the logo as needed */
+  height: 30px;
   width: auto;
 }
 
 /* Styling for the drop-down list */
 #search-results {
   display: none;
+  color: black;
   border: 1px solid #ccc;
   padding: 5px;
   position: absolute;
   background-color: #fff;
   width: 100%;
-  max-height: 200px;
+  max-height: 800px;
   overflow-y: auto;
   box-sizing: border-box;
   margin: 0;
@@ -46,7 +47,7 @@ body {
 
 /* Width of search input box */
 #query {
-  width: 300px;
+  width: 500px;
 }
 
 #search-results li {
@@ -54,9 +55,10 @@ body {
   cursor: pointer;
 }
 
+/* Search result image size*/
 #search-results li img {
-  width: 30px;
-  height: 30px;
+  width: 100px;
+  height: 150px;
   margin-right: 5px;
 }
 
