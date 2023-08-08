@@ -1,6 +1,8 @@
 const searchInput = document.getElementById("query");
+const searchId = document.getElementById("id");
 const searchResults = document.getElementById("search-results");
 let debounceTimer;
+let id = "";
 
 async function fetchSearchResults(query) {
   try {
@@ -42,18 +44,21 @@ async function updateResults() {
         year = item.release_date ? item.release_date.substring(0, 4) : "N/A";
         overview = item.overview
         department = "";
+        id = item.id;
       } else if (item.media_type === "tv") {
         dataType = "TV Show";
         imgSrc = `https://image.tmdb.org/t/p/w92${item.poster_path}`;
         year = item.first_air_date ? item.first_air_date.substring(0, 4) : "N/A";
         overview = item.overview
         department = "";
+        id = item.id;
       } else if (item.media_type === "person") {
         dataType = "Actor";
         imgSrc = `https://image.tmdb.org/t/p/w92${item.profile_path}`;
         year = "";
         overview = "";
         department = item.known_for_department;
+        id = item.id;
       } else {
         // Unsupported media type, skip
         return;
@@ -101,10 +106,11 @@ searchInput.addEventListener("input", updateResults);
 
 searchResults.addEventListener("click", event => {
   const clickedLi = event.target.closest("li");
-  
+
   if (clickedLi) {
     const selectedText = clickedLi.querySelector("h3").textContent.trim();
     searchInput.value = selectedText;
+    searchId.value = id;
     searchResults.style.display = "none";
   }
 });
