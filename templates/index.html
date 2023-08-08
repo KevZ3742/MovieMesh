@@ -17,18 +17,11 @@
         <a href="#Contact">Contact</a>
     </div>
     <form id="inputs">
-        <label for="query">Query:</label>
         <div class="search-container">
             <input type="text" id="query" name="query" placeholder="Movie, TV Show, or Actor" required/>
-            <input type="text" id="id" name="id" value="" hidden/>
+            <input type="text" id="id" name="id" hidden/>
             <ul id="search-results"></ul>
         </div>
-        <br>
-        <div>
-            <input type="submit">
-            <input type="reset">
-        </div>
-        <br>
         <div>
             <p>You Submitted: {{ query }}</p>
             <p>ID: {{ id }}</p>

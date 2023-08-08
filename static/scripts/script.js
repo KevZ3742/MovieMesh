@@ -1,6 +1,7 @@
 const searchInput = document.getElementById("query");
 const searchId = document.getElementById("id");
 const searchResults = document.getElementById("search-results");
+const form = document.getElementById('inputs');
 let debounceTimer;
 let id = "";
 
@@ -42,14 +43,14 @@ async function updateResults() {
         dataType = "Movie";
         imgSrc = `https://image.tmdb.org/t/p/w92${item.poster_path}`;
         year = item.release_date ? item.release_date.substring(0, 4) : "N/A";
-        overview = item.overview
+        overview = item.overview;
         department = "";
         id = item.id;
       } else if (item.media_type === "tv") {
         dataType = "TV Show";
         imgSrc = `https://image.tmdb.org/t/p/w92${item.poster_path}`;
         year = item.first_air_date ? item.first_air_date.substring(0, 4) : "N/A";
-        overview = item.overview
+        overview = item.overview;
         department = "";
         id = item.id;
       } else if (item.media_type === "person") {
@@ -81,7 +82,7 @@ async function updateResults() {
         pYear.textContent = year;
         pYear.classList.add("year");
         div.appendChild(pYear);
-        
+
         const pOverview = document.createElement("p")
         pOverview.textContent = overview;
         pOverview.classList.add("overview");
@@ -102,7 +103,30 @@ async function updateResults() {
   }, 300);
 }
 
+function hideResults() {
+  searchResults.style.display = "none";
+}
+
 searchInput.addEventListener("input", updateResults);
+
+searchInput.addEventListener("blur", () => {
+  setTimeout(hideResults, 100);
+});
+
+searchInput.addEventListener("focus", () => {
+  if (searchInput.value.trim() !== "") {
+    searchResults.style.display = "block";
+  }
+});
+
+document.addEventListener("click", event => {
+  const isClickedInsideInput = searchInput.contains(event.target);
+  const isClickedInsideResults = searchResults.contains(event.target);
+
+  if (!isClickedInsideInput && !isClickedInsideResults) {
+    hideResults();
+  }
+});
 
 searchResults.addEventListener("click", event => {
   const clickedLi = event.target.closest("li");
@@ -111,6 +135,8 @@ searchResults.addEventListener("click", event => {
     const selectedText = clickedLi.querySelector("h3").textContent.trim();
     searchInput.value = selectedText;
     searchId.value = id;
-    searchResults.style.display = "none";
+
+    setTimeout(hideResults, 100);
+    form.submit();
   }
 });

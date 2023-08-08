@@ -4,6 +4,13 @@ body {
   color: #fff;
 }
 
+#inputs {
+  margin-top: 20px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
 .navbar {
   background-color: #010409;
   overflow: hidden;
