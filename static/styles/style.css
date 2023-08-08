@@ -30,6 +30,7 @@ body {
   background-color: #555;
   border-radius: 4px;
   padding: 7px 7px;
+  box-shadow: 0 0 0 2px white; /* Add a white border */
 }
 
 .navbar .logo img {
@@ -65,7 +66,7 @@ body {
   margin-bottom: 10px;
 }
 
-/* Search result image size*/
+/* Search result image size */
 #search-results li img {
   width: 100px;
   height: 150px;
