@@ -1,6 +1,7 @@
 const searchInput = document.getElementById("query");
 const searchId = document.getElementById("id");
 const searchResults = document.getElementById("search-results");
+const form = document.getElementById("inputs");
 let debounceTimer;
 let id = "";
 
@@ -112,5 +113,6 @@ searchResults.addEventListener("click", event => {
     searchInput.value = selectedText;
     searchId.value = id;
     searchResults.style.display = "none";
+    form.submit();
   }
 });
