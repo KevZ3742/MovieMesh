@@ -30,6 +30,14 @@ body {
   width: auto;
 }
 
+#inputs {
+  margin-top: 20px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+}
+
 /* Styling for the drop-down list */
 #search-results {
   display: none;
