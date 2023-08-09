@@ -1,9 +1,8 @@
 const searchInput = document.getElementById("query");
 const searchId = document.getElementById("id");
 const searchResults = document.getElementById("search-results");
-const form = document.getElementById('inputs');
+const form = document.getElementById("inputs");
 let debounceTimer;
-let id = "";
 
 async function fetchSearchResults(query) {
   try {
@@ -38,6 +37,7 @@ async function updateResults() {
       let year;
       let overview;
       let department;
+      let id;
 
       if (item.media_type === "movie") {
         dataType = "Movie";
@@ -66,6 +66,11 @@ async function updateResults() {
       }
 
       const li = document.createElement("li");
+
+      const hiddenId = document.createElement('p');
+      hiddenId.textContent = id
+      hiddenId.style.display = 'none';
+      li.appendChild(hiddenId)
 
       const img = document.createElement("img");
       img.src = imgSrc;
@@ -134,9 +139,25 @@ searchResults.addEventListener("click", event => {
   if (clickedLi) {
     const selectedText = clickedLi.querySelector("h3").textContent.trim();
     searchInput.value = selectedText;
-    searchId.value = id;
-
-    setTimeout(hideResults, 100);
+    searchId.value = clickedLi.querySelector("p").textContent.trim();
+    searchResults.style.display = "none";
     form.submit();
   }
+});
+
+// Event listener for clicks anywhere in the document
+document.addEventListener("click", event => {
+  const isClickInsideSearchInput = searchInput.contains(event.target);
+  const isClickInsideSearchResults = searchResults.contains(event.target);
+
+  if (!isClickInsideSearchInput && !isClickInsideSearchResults) {
+    // Click happened outside of search input and search results
+    searchResults.style.display = "none";
+  }
+});
+
+// Event listener for clicks on the search input
+searchInput.addEventListener("click", () => {
+  // Show search results when input is clicked
+  searchResults.style.display = "block";
 });
