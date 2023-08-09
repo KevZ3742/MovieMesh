@@ -114,25 +114,6 @@ function hideResults() {
 
 searchInput.addEventListener("input", updateResults);
 
-searchInput.addEventListener("blur", () => {
-  setTimeout(hideResults, 100);
-});
-
-searchInput.addEventListener("focus", () => {
-  if (searchInput.value.trim() !== "") {
-    searchResults.style.display = "block";
-  }
-});
-
-document.addEventListener("click", event => {
-  const isClickedInsideInput = searchInput.contains(event.target);
-  const isClickedInsideResults = searchResults.contains(event.target);
-
-  if (!isClickedInsideInput && !isClickedInsideResults) {
-    hideResults();
-  }
-});
-
 searchResults.addEventListener("click", event => {
   const clickedLi = event.target.closest("li");
 
@@ -145,19 +126,15 @@ searchResults.addEventListener("click", event => {
   }
 });
 
-// Event listener for clicks anywhere in the document
 document.addEventListener("click", event => {
   const isClickInsideSearchInput = searchInput.contains(event.target);
   const isClickInsideSearchResults = searchResults.contains(event.target);
 
   if (!isClickInsideSearchInput && !isClickInsideSearchResults) {
-    // Click happened outside of search input and search results
     searchResults.style.display = "none";
   }
 });
 
-// Event listener for clicks on the search input
 searchInput.addEventListener("click", () => {
-  // Show search results when input is clicked
   searchResults.style.display = "block";
 });
