@@ -7,15 +7,16 @@ body {
 .navbar {
   background-color: #010409;
   overflow: hidden;
+  white-space: nowrap; /* Prevent links from moving to next line */
 }
 
 .navbar a {
-  float: left;
-  display: block;
+  display: inline-block; /* Display links inline */
   color: #fff;
   text-align: center;
   padding: 20px 20px;
   text-decoration: none;
+  border: 2px solid transparent; /* Initial border setting */
 }
 
 .navbar a:not(.logo):hover {
@@ -23,6 +24,7 @@ body {
   background-color: #555;
   border-radius: 4px;
   padding: 7px 7px;
+  border-color: white; /* Border color on hover */
 }
 
 .navbar .logo img {
@@ -66,7 +68,7 @@ body {
   margin-bottom: 10px;
 }
 
-/* Search result image size*/
+/* Search result image size */
 #search-results li img {
   width: 100px;
   height: 150px;
@@ -104,4 +106,30 @@ body {
 .search-container {
   position: relative;
   display: inline-block;
+}
+
+/* Styles for the box layout */
+.box-container {
+  margin: 20px 60px 60px 60px;
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  height: 80vh;
+}
+
+.box {
+  flex-grow: 1;
+  background-color: black;
+  border: 2px solid white;
+  border-radius: 15px;
+  margin: 0 20px;
+  height: 100%;
+}
+
+.box.center {
+  flex-grow: 2;
+  background-color: black;
+  border: 2px solid white;
+  border-radius: 15px;
+  height: 100%;
 }
