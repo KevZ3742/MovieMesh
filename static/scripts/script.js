@@ -3,7 +3,6 @@ const searchId = document.getElementById("id");
 const searchResults = document.getElementById("search-results");
 const form = document.getElementById("inputs");
 let debounceTimer;
-let id = "";
 
 async function fetchSearchResults(query) {
   try {
@@ -38,6 +37,7 @@ async function updateResults() {
       let year;
       let overview;
       let department;
+      let id;
 
       if (item.media_type === "movie") {
         dataType = "Movie";
@@ -66,6 +66,11 @@ async function updateResults() {
       }
 
       const li = document.createElement("li");
+
+      const hiddenId = document.createElement('p');
+      hiddenId.textContent = id
+      hiddenId.style.display = 'none';
+      li.appendChild(hiddenId)
 
       const img = document.createElement("img");
       img.src = imgSrc;
@@ -111,7 +116,7 @@ searchResults.addEventListener("click", event => {
   if (clickedLi) {
     const selectedText = clickedLi.querySelector("h3").textContent.trim();
     searchInput.value = selectedText;
-    searchId.value = id;
+    searchId.value = clickedLi.querySelector("p").textContent.trim();
     searchResults.style.display = "none";
     form.submit();
   }
