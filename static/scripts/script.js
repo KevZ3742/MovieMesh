@@ -116,3 +116,20 @@ searchResults.addEventListener("click", event => {
     form.submit();
   }
 });
+
+// Event listener for clicks anywhere in the document
+document.addEventListener("click", event => {
+  const isClickInsideSearchInput = searchInput.contains(event.target);
+  const isClickInsideSearchResults = searchResults.contains(event.target);
+
+  if (!isClickInsideSearchInput && !isClickInsideSearchResults) {
+    // Click happened outside of search input and search results
+    searchResults.style.display = "none";
+  }
+});
+
+// Event listener for clicks on the search input
+searchInput.addEventListener("click", () => {
+  // Show search results when input is clicked
+  searchResults.style.display = "block";
+});
