@@ -11,7 +11,9 @@ export class CatalogMissingError extends Error {
   constructor(public file: string) {
     super(
       `catalog.db not found at ${file}. Copy your catalog.db to data/catalog.db, set CATALOG_DB, ` +
-        `or (on Vercel) upload it to a Blob store and set BLOB_READ_WRITE_TOKEN.`,
+        `or (on Vercel) upload it to a Blob store and set BLOB_READ_WRITE_TOKEN. ` +
+        `[debug: ${g.__catalogNote ?? "download step never ran"}; ` +
+        `BLOB_READ_WRITE_TOKEN is ${process.env.BLOB_READ_WRITE_TOKEN ? "set" : "NOT set"}]`,
     );
   }
 }
@@ -28,6 +30,7 @@ const g = globalThis as unknown as {
   __catalog?: Db;
   __tables?: Map<string, boolean>;
   __catalogReady?: Promise<void>;
+  __catalogNote?: string; // what the download step did, shown on the setup page to help debug
 };
 
 // ---------- where is the file? ----------
@@ -53,6 +56,8 @@ function catalogPath(): string {
  */
 export function ensureCatalogFile(): Promise<void> {
   g.__catalogReady ??= download().catch((err) => {
+    g.__catalogNote = `download failed: ${err instanceof Error ? err.message : String(err)}`;
+    console.error("[catalog]", g.__catalogNote);
     g.__catalogReady = undefined; // let the next call retry instead of caching the failure
     throw err;
   });
@@ -61,14 +66,21 @@ export function ensureCatalogFile(): Promise<void> {
 
 async function download(): Promise<void> {
   const existing = catalogPath();
-  if (fs.existsSync(/* turbopackIgnore: true */ existing)) return;
-  if (!process.env.BLOB_READ_WRITE_TOKEN) return; // nothing to download from; getDb() will report the missing file
+  if (fs.existsSync(/* turbopackIgnore: true */ existing)) {
+    g.__catalogNote = `file already at ${existing}`;
+    return;
+  }
+  if (!process.env.BLOB_READ_WRITE_TOKEN) {
+    g.__catalogNote = "download skipped: no token";
+    console.error("[catalog] BLOB_READ_WRITE_TOKEN is not set, so catalog.db can't be downloaded.");
+    return; // nothing to download from; getDb() will report the missing file
+  }
 
   // Imported lazily so local dev without the package/token never touches it.
   const { get } = await import("@vercel/blob");
   const result = await get(BLOB_PATHNAME, { access: "private" });
   if (!result || result.statusCode !== 200 || !result.stream) {
-    throw new Error(`Could not download "${BLOB_PATHNAME}" from Vercel Blob.`);
+    throw new Error(`Could not download "${BLOB_PATHNAME}" from Vercel Blob (status ${result?.statusCode ?? "none"}).`);
   }
 
   // Write to a scratch name and rename, so a half-finished download is never opened as a database.
@@ -78,6 +90,8 @@ async function download(): Promise<void> {
     fs.createWriteStream(/* turbopackIgnore: true */ partial),
   );
   fs.renameSync(/* turbopackIgnore: true */ partial, /* turbopackIgnore: true */ TMP_FILE);
+  g.__catalogNote = "downloaded from Blob";
+  console.log("[catalog] downloaded catalog.db from Vercel Blob");
 }
 
 // ---------- opening it ----------

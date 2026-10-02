@@ -74,7 +74,6 @@ src/
     GradeLegend.tsx
     LibraryPanel.tsx
     MeshCanvas.tsx
-    MonthStrip.tsx
     MoviePanel.tsx
     nodes.tsx
     ScoreRadar.tsx
@@ -99,6 +98,7 @@ src/
     types.ts
     useBubblePhysics.ts
     when.ts
+  instrumentation.ts
 .env.example
 .gitignore
 eslint.config.mjs
@@ -246,37 +246,6 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
     <html lang="en" className="h-full antialiased">
       <body className="min-h-full flex flex-col">{children}</body>
     </html>
-  );
-}
-</file>
-
-<file path="src/components/MonthStrip.tsx">
-import { MONTHS, MONTH_COLORS, MONTH_SHORT } from "@/lib/seasons";
-
-/**
- * Twelve cells, one per month. With `peak`, only that month is filled in its colour.
- * With `all`, every month shows its colour (used as the legend). A dot marks the current month.
- */
-export function MonthStrip({ peak = null, all = false, now }: { peak?: number | null; all?: boolean; now?: Date }) {
-  const current = now?.getMonth();
-  const label = all
-    ? "Colour for each month of the year"
-    : peak === null
-      ? "No seasonal peak"
-      : `Best in ${MONTHS[peak]}`;
-  return (
-    <div role="img" aria-label={label} className="grid grid-cols-12 gap-[3px]">
-      {MONTHS.map((_, i) => (
-        <div key={i} className="flex flex-col items-center gap-1">
-          <div
-            className="h-5 w-full rounded-[3px]"
-            style={{ background: all || i === peak ? MONTH_COLORS[i] : "var(--line)" }}
-          />
-          <span className="text-[10px] leading-none text-muted">{MONTH_SHORT[i][0]}</span>
-          <span className={`h-1 w-1 rounded-full ${current === i ? "bg-ink" : ""}`} />
-        </div>
-      ))}
-    </div>
   );
 }
 </file>
@@ -861,66 +830,6 @@ export function Welcome({ starters, now, onPick }: { starters: Starter[]; now: D
 }
 </file>
 
-<file path="src/lib/db.ts">
-import path from "node:path";
-// Node's built-in SQLite (Node 22.13+). No native module to compile, so no Visual Studio / node-gyp on Windows.
-import { DatabaseSync } from "node:sqlite";
-
-export class CatalogMissingError extends Error {
-  constructor(public file: string) {
-    super(`catalog.db not found at ${file}. Copy your catalog.db to data/catalog.db or set CATALOG_DB.`);
-  }
-}
-
-/** The small slice of the SQLite API this app uses. Rows are untyped; callers cast them. */
-export type Db = {
-  prepare(sql: string): {
-    all(...params: (string | number)[]): unknown[];
-    get(...params: (string | number)[]): unknown;
-  };
-};
-
-const g = globalThis as unknown as { __catalog?: Db; __tables?: Map<string, boolean> };
-
-export function getDb(): Db {
-  if (g.__catalog) return g.__catalog;
-  const file = process.env.CATALOG_DB || path.join(process.cwd(), "data", "catalog.db");
-  try {
-    // readOnly never creates a file, so a wrong path fails here instead of silently making an empty database.
-    const raw = new DatabaseSync(file, { readOnly: true });
-    // node:sqlite returns rows with a null prototype, which React refuses to pass from a Server Component
-    // to a Client Component. Copy each row into a plain object once, here, so nothing downstream has to care.
-    const plain = (row: unknown) => (row && typeof row === "object" ? { ...(row as object) } : row);
-    g.__catalog = {
-      prepare(sql) {
-        const stmt = raw.prepare(sql);
-        return {
-          all: (...params) => stmt.all(...params).map(plain),
-          get: (...params) => plain(stmt.get(...params)),
-        };
-      },
-    };
-  } catch (err) {
-    if (err instanceof Error && /unable to open|does not exist|cannot open/i.test(err.message)) {
-      throw new CatalogMissingError(file);
-    }
-    throw err;
-  }
-  g.__tables = new Map();
-  return g.__catalog;
-}
-
-/** Optional tables (seasonal_movies, movies_fts) may not exist in every catalog build. */
-export function hasTable(name: string): boolean {
-  const db = getDb();
-  const cache = g.__tables!;
-  if (!cache.has(name)) {
-    cache.set(name, !!db.prepare("SELECT 1 FROM sqlite_master WHERE name = ?").get(name));
-  }
-  return cache.get(name)!;
-}
-</file>
-
 <file path="src/lib/images.ts">
 /** TMDB image URLs. Client-safe: no fetching, no secrets. */
 export const imageUrl = (p: string | null, size: "w92" | "w185" | "w342" = "w185") =>
@@ -1375,6 +1284,17 @@ export function computeWhen(m: Pick<Movie, "title" | "genres" | "tags" | "season
     strength: "none",
     reason: "No seasonal pattern found for this movie. Timing by runtime and mood comes later.",
   };
+}
+</file>
+
+<file path="src/instrumentation.ts">
+// Runs once when the server starts, before it handles any request.
+// Downloads catalog.db from Vercel Blob if it isn't already on disk, so getDb() can stay synchronous.
+export async function register() {
+  if (process.env.NEXT_RUNTIME === "nodejs") {
+    const { ensureCatalogFile } = await import("./lib/db");
+    await ensureCatalogFile();
+  }
 }
 </file>
 
@@ -2415,38 +2335,6 @@ export async function getTmdbMovie(tmdbId: number): Promise<TmdbMovie | null> {
 }
 </file>
 
-<file path="package.json">
-{
-  "name": "moviemesh",
-  "version": "0.1.0",
-  "private": true,
-  "scripts": {
-    "dev": "next dev",
-    "build": "next build",
-    "start": "next start",
-    "lint": "eslint"
-  },
-  "dependencies": {
-    "@fontsource-variable/bricolage-grotesque": "^5.3.0",
-    "@fontsource-variable/instrument-sans": "^5.3.0",
-    "@xyflow/react": "^12.12.0",
-    "next": "16.3.8",
-    "react": "19.2.8",
-    "react-dom": "19.2.8"
-  },
-  "devDependencies": {
-    "@tailwindcss/postcss": "^4",
-    "@types/node": "^24.19.1",
-    "@types/react": "^19",
-    "@types/react-dom": "^19",
-    "eslint": "^9",
-    "eslint-config-next": "16.3.8",
-    "tailwindcss": "^4",
-    "typescript": "^5"
-  }
-}
-</file>
-
 <file path="data/build_catalog.py">
 """
 Build catalog.db (SQLite) from MovieLens ml-32m files.
@@ -2770,6 +2658,130 @@ export function GradeLegend() {
       </div>
     </div>
   );
+}
+</file>
+
+<file path="src/lib/db.ts">
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
+import type { ReadableStream as NodeWebStream } from "node:stream/web";
+// Node's built-in SQLite (Node 22.13+). No native module to compile, so no Visual Studio / node-gyp on Windows.
+import { DatabaseSync } from "node:sqlite";
+
+export class CatalogMissingError extends Error {
+  constructor(public file: string) {
+    super(
+      `catalog.db not found at ${file}. Copy your catalog.db to data/catalog.db, set CATALOG_DB, ` +
+        `or (on Vercel) upload it to a Blob store and set BLOB_READ_WRITE_TOKEN.`,
+    );
+  }
+}
+
+/** The small slice of the SQLite API this app uses. Rows are untyped; callers cast them. */
+export type Db = {
+  prepare(sql: string): {
+    all(...params: (string | number)[]): unknown[];
+    get(...params: (string | number)[]): unknown;
+  };
+};
+
+const g = globalThis as unknown as {
+  __catalog?: Db;
+  __tables?: Map<string, boolean>;
+  __catalogReady?: Promise<void>;
+};
+
+// ---------- where is the file? ----------
+
+const LOCAL_FILE = path.join(process.cwd(), "data", "catalog.db");
+// On Vercel only /tmp is writable. os.tmpdir() gives /tmp there and the normal temp folder elsewhere.
+const TMP_FILE = path.join(os.tmpdir(), "catalog.db");
+// Pathname of the file inside your Blob store (the name you gave it when uploading).
+const BLOB_PATHNAME = process.env.CATALOG_BLOB_PATH || "catalog.db";
+
+/** CATALOG_DB wins, then data/catalog.db (local dev), then the copy downloaded from Blob. */
+function catalogPath(): string {
+  if (process.env.CATALOG_DB) return process.env.CATALOG_DB;
+  // turbopackIgnore: these paths are only known at runtime; without it Turbopack traces the whole project.
+  if (fs.existsSync(/* turbopackIgnore: true */ LOCAL_FILE)) return LOCAL_FILE;
+  return TMP_FILE;
+}
+
+/**
+ * Makes sure the catalog file exists on disk. Call once at server start (see instrumentation.ts).
+ * Does nothing if the file is already there (local dev, or a warm serverless instance).
+ * Otherwise downloads it from a private Vercel Blob store into the temp folder.
+ */
+export function ensureCatalogFile(): Promise<void> {
+  g.__catalogReady ??= download().catch((err) => {
+    g.__catalogReady = undefined; // let the next call retry instead of caching the failure
+    throw err;
+  });
+  return g.__catalogReady;
+}
+
+async function download(): Promise<void> {
+  const existing = catalogPath();
+  if (fs.existsSync(/* turbopackIgnore: true */ existing)) return;
+  if (!process.env.BLOB_READ_WRITE_TOKEN) return; // nothing to download from; getDb() will report the missing file
+
+  // Imported lazily so local dev without the package/token never touches it.
+  const { get } = await import("@vercel/blob");
+  const result = await get(BLOB_PATHNAME, { access: "private" });
+  if (!result || result.statusCode !== 200 || !result.stream) {
+    throw new Error(`Could not download "${BLOB_PATHNAME}" from Vercel Blob.`);
+  }
+
+  // Write to a scratch name and rename, so a half-finished download is never opened as a database.
+  const partial = `${TMP_FILE}.${process.pid}.part`;
+  await pipeline(
+    Readable.fromWeb(result.stream as unknown as NodeWebStream),
+    fs.createWriteStream(/* turbopackIgnore: true */ partial),
+  );
+  fs.renameSync(/* turbopackIgnore: true */ partial, /* turbopackIgnore: true */ TMP_FILE);
+}
+
+// ---------- opening it ----------
+
+export function getDb(): Db {
+  if (g.__catalog) return g.__catalog;
+  const file = catalogPath();
+  try {
+    // readOnly never creates a file, so a wrong path fails here instead of silently making an empty database.
+    const raw = new DatabaseSync(file, { readOnly: true });
+    // node:sqlite returns rows with a null prototype, which React refuses to pass from a Server Component
+    // to a Client Component. Copy each row into a plain object once, here, so nothing downstream has to care.
+    const plain = (row: unknown) => (row && typeof row === "object" ? { ...(row as object) } : row);
+    g.__catalog = {
+      prepare(sql) {
+        const stmt = raw.prepare(sql);
+        return {
+          all: (...params) => stmt.all(...params).map(plain),
+          get: (...params) => plain(stmt.get(...params)),
+        };
+      },
+    };
+  } catch (err) {
+    if (err instanceof Error && /unable to open|does not exist|cannot open/i.test(err.message)) {
+      throw new CatalogMissingError(file);
+    }
+    throw err;
+  }
+  g.__tables = new Map();
+  return g.__catalog;
+}
+
+/** Optional tables (seasonal_movies, movies_fts) may not exist in every catalog build. */
+export function hasTable(name: string): boolean {
+  const db = getDb();
+  const cache = g.__tables!;
+  if (!cache.has(name)) {
+    cache.set(name, !!db.prepare("SELECT 1 FROM sqlite_master WHERE name = ?").get(name));
+  }
+  return cache.get(name)!;
 }
 </file>
 
@@ -3147,6 +3159,39 @@ export function scoreMovie(f: MovieFeatures, lib: Library, now: Date): Scored {
     (x, i): Factor => ({ ...x, label: LABELS[x.key], points: points[i], max: Math.max(Math.round(maxOf(x)), points[i]) }),
   );
   return { ...base, state: "scored", score, tier: tierFor(score), factors };
+}
+</file>
+
+<file path="package.json">
+{
+  "name": "moviemesh",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint"
+  },
+  "dependencies": {
+    "@fontsource-variable/bricolage-grotesque": "^5.3.0",
+    "@fontsource-variable/instrument-sans": "^5.3.0",
+    "@vercel/blob": "^2.8.0",
+    "@xyflow/react": "^12.12.0",
+    "next": "16.3.8",
+    "react": "19.2.8",
+    "react-dom": "19.2.8"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4",
+    "@types/node": "^24.19.1",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "eslint": "^9",
+    "eslint-config-next": "16.3.8",
+    "tailwindcss": "^4",
+    "typescript": "^5"
+  }
 }
 </file>
 
