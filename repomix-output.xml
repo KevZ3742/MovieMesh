@@ -97,6 +97,7 @@ src/
     streaks.ts
     tmdb.ts
     types.ts
+    useBubblePhysics.ts
     when.ts
 .env.example
 .gitignore
@@ -1030,6 +1031,289 @@ export function streakText(s: Streak): string {
 }
 </file>
 
+<file path="src/lib/useBubblePhysics.ts">
+"use client";
+
+import { useEffect, useMemo, useRef, type Dispatch, type SetStateAction } from "react";
+import { useReactFlow, type Node } from "@xyflow/react";
+
+/*
+ * Bubbly node physics.
+ *
+ *  - Nodes are soft rectangles. When two overlap they shove each other apart along the line between
+ *    their centres. The shove is part instant correction, part velocity, so they slightly overshoot
+ *    and wobble back (that's the "bubbly" part).
+ *  - A node can be "launched": it springs from where it is to a target spot, so new nodes pop out of
+ *    the node you clicked instead of appearing in place.
+ *  - A node being dragged is pinned: it ignores physics and everything else gets out of its way, live.
+ *  - The loop runs only while something is moving, then goes to sleep.
+ */
+
+type Point = { x: number; y: number };
+
+type Body = {
+  vx: number;
+  vy: number;
+  /** Where a launched node is heading (top-left, like node.position). */
+  target: Point | null;
+  /** Until this time a freshly launched node doesn't collide with its parent or its siblings. */
+  graceUntil: number;
+  ignoreId: string | null;
+};
+
+type Item = {
+  id: string;
+  x: number;
+  y: number;
+  startX: number;
+  startY: number;
+  w: number;
+  h: number;
+  body: Body;
+  fixed: boolean;
+};
+
+// Used until React Flow has measured a node (matches w-44 and the usual card height).
+const FALLBACK_W = 176;
+const FALLBACK_H = 80;
+
+// Tuning. Change these to taste:
+const GAP = 18; // breathing room kept between nodes (px)
+const SPRING = 0.05; // pull of a launched node toward its target; lower = lazier
+const PUSH = 0.06; // velocity added per px of overlap; higher = more bounce
+const FIX = 0.2; // share of an overlap corrected instantly each frame; higher = stiffer
+const DAMP = 0.85; // velocity kept per frame (at 60fps); closer to 1 = wobblier
+const MAX_SPEED = 60; // px per frame cap
+const REST_SPEED = 0.05; // below this a node counts as still
+const GRACE_MS = 450;
+
+const reducedMotion = () => window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+function angleFor(a: string, b: string) {
+  let h = 0;
+  for (const ch of a + b) h = (h * 31 + ch.charCodeAt(0)) | 0;
+  return (Math.abs(h) % 360) * (Math.PI / 180);
+}
+
+export function useBubblePhysics<N extends Node>(setNodes: Dispatch<SetStateAction<N[]>>, onSettle: () => void) {
+  const { getNodes } = useReactFlow();
+  const onSettleRef = useRef(onSettle);
+  useEffect(() => {
+    onSettleRef.current = onSettle;
+  });
+
+  const raf = useRef(0);
+  useEffect(() => () => cancelAnimationFrame(raf.current), []);
+
+  return useMemo(() => {
+    const bodies = new Map<string, Body>();
+    const pinned = new Set<string>();
+    let last = 0;
+    let notify = false;
+
+    const bodyOf = (id: string): Body => {
+      let b = bodies.get(id);
+      if (!b) {
+        b = { vx: 0, vy: 0, target: null, graceUntil: 0, ignoreId: null };
+        bodies.set(id, b);
+      }
+      return b;
+    };
+
+    const build = (): Item[] =>
+      getNodes().map((n) => ({
+        id: n.id,
+        x: n.position.x,
+        y: n.position.y,
+        startX: n.position.x,
+        startY: n.position.y,
+        w: n.measured?.width ?? FALLBACK_W,
+        h: n.measured?.height ?? FALLBACK_H,
+        body: bodyOf(n.id),
+        fixed: pinned.has(n.id),
+      }));
+
+    const skipPair = (a: Item, c: Item, now: number) => {
+      const ga = now < a.body.graceUntil;
+      const gc = now < c.body.graceUntil;
+      if (ga && gc) return true; // siblings fly out together without bumping
+      if (ga && a.body.ignoreId === c.id) return true; // and don't fight the node they came from
+      if (gc && c.body.ignoreId === a.id) return true;
+      return false;
+    };
+
+    /** One physics step. Returns true while anything still needs to move. */
+    const step = (items: Item[], dt: number, now: number): boolean => {
+      let active = false;
+      const damp = Math.pow(DAMP, dt);
+
+      // 1. launched nodes spring toward their targets
+      for (const it of items) {
+        const b = it.body;
+        if (it.fixed) {
+          b.vx = 0;
+          b.vy = 0;
+          b.target = null;
+          continue;
+        }
+        if (!b.target) continue;
+        const ex = b.target.x - it.x;
+        const ey = b.target.y - it.y;
+        b.vx += ex * SPRING * dt;
+        b.vy += ey * SPRING * dt;
+        active = true;
+        if (Math.abs(ex) < 0.5 && Math.abs(ey) < 0.5 && Math.hypot(b.vx, b.vy) < 0.15) b.target = null;
+      }
+
+      // 2. overlapping nodes push each other apart
+      for (let i = 0; i < items.length; i++) {
+        for (let j = i + 1; j < items.length; j++) {
+          const a = items[i];
+          const c = items[j];
+          if (a.fixed && c.fixed) continue;
+          if (skipPair(a, c, now)) continue;
+
+          const dx = c.x + c.w / 2 - (a.x + a.w / 2);
+          const dy = c.y + c.h / 2 - (a.y + a.h / 2);
+          const ox = (a.w + c.w) / 2 + GAP - Math.abs(dx);
+          const oy = (a.h + c.h) / 2 + GAP - Math.abs(dy);
+          if (ox <= 0 || oy <= 0 || Math.min(ox, oy) < 0.5) continue;
+
+          let ux = dx;
+          let uy = dy;
+          let len = Math.hypot(ux, uy);
+          if (len < 0.001) {
+            const ang = angleFor(a.id, c.id); // stacked exactly: pick a stable random direction
+            ux = Math.cos(ang);
+            uy = Math.sin(ang);
+            len = 1;
+          }
+          ux /= len;
+          uy /= len;
+          // distance to travel along the centre line to clear the overlap on either axis
+          const reach = Math.min(ox / Math.max(Math.abs(ux), 0.001), oy / Math.max(Math.abs(uy), 0.001), ox + oy);
+
+          const wa = a.fixed ? 0 : 1;
+          const wc = c.fixed ? 0 : 1;
+          const total = wa + wc;
+          const sa = wa / total;
+          const sc = wc / total;
+          a.x -= ux * reach * FIX * sa;
+          a.y -= uy * reach * FIX * sa;
+          c.x += ux * reach * FIX * sc;
+          c.y += uy * reach * FIX * sc;
+          a.body.vx -= ux * reach * PUSH * sa * dt;
+          a.body.vy -= uy * reach * PUSH * sa * dt;
+          c.body.vx += ux * reach * PUSH * sc * dt;
+          c.body.vy += uy * reach * PUSH * sc * dt;
+          active = true;
+        }
+      }
+
+      // 3. move
+      for (const it of items) {
+        if (it.fixed) continue;
+        const b = it.body;
+        b.vx *= damp;
+        b.vy *= damp;
+        const speed = Math.hypot(b.vx, b.vy);
+        if (speed > MAX_SPEED) {
+          b.vx = (b.vx / speed) * MAX_SPEED;
+          b.vy = (b.vy / speed) * MAX_SPEED;
+        }
+        it.x += b.vx * dt;
+        it.y += b.vy * dt;
+        if (speed > REST_SPEED) active = true;
+      }
+
+      // a launched node that isn't on the canvas yet still needs us to keep going
+      const seen = new Set(items.map((it) => it.id));
+      for (const [id, b] of bodies) if (b.target && !seen.has(id)) active = true;
+
+      return active;
+    };
+
+    const commit = (items: Item[]) => {
+      const next = new Map<string, Point>();
+      for (const it of items) {
+        if (it.fixed) continue;
+        if (Math.abs(it.x - it.startX) > 0.01 || Math.abs(it.y - it.startY) > 0.01) next.set(it.id, { x: it.x, y: it.y });
+      }
+      if (!next.size) return;
+      setNodes((ns) =>
+        ns.map((n) => {
+          const p = next.get(n.id);
+          return p && !pinned.has(n.id) ? { ...n, position: p } : n;
+        }),
+      );
+    };
+
+    const finish = () => {
+      if (!notify) return;
+      notify = false;
+      onSettleRef.current();
+    };
+
+    const tick = (t: number) => {
+      const dt = Math.min(Math.max((t - last) / 16.667, 0.25), 2);
+      last = t;
+      const items = build();
+      const active = step(items, dt, t);
+      commit(items);
+      if (active) {
+        raf.current = requestAnimationFrame(tick);
+      } else {
+        raf.current = 0;
+        finish();
+      }
+    };
+
+    const wake = () => {
+      if (raf.current) return;
+      if (reducedMotion()) {
+        // No animation: work out the final layout in one go.
+        raf.current = requestAnimationFrame(() => {
+          const items = build();
+          const later = performance.now() + 1e6; // grace periods are over
+          for (let i = 0; i < 600 && step(items, 1, later); i++);
+          commit(items);
+          raf.current = 0;
+          finish();
+        });
+        return;
+      }
+      last = performance.now();
+      raf.current = requestAnimationFrame(tick);
+    };
+
+    return {
+      /** Spring a node (already added to the canvas) toward `target`, ignoring the node it came from at first. */
+      launch(id: string, target: Point, fromId: string | null) {
+        const b = bodyOf(id);
+        b.vx = 0;
+        b.vy = 0;
+        b.target = target;
+        b.graceUntil = performance.now() + GRACE_MS;
+        b.ignoreId = fromId;
+        notify = true;
+        wake();
+      },
+      /** Hold a node still (while it's being dragged) so it shoves others without being shoved. */
+      pin(id: string) {
+        pinned.add(id);
+        wake();
+      },
+      unpin(id: string) {
+        pinned.delete(id);
+        wake();
+      },
+      /** Something changed (a node moved or was added): resolve any overlaps. */
+      wake,
+    };
+  }, [getNodes, setNodes]);
+}
+</file>
+
 <file path="src/lib/when.ts">
 import { MONTHS } from "./seasons";
 import type { Movie, When } from "./types";
@@ -1492,85 +1776,6 @@ export default async function MoviePage({ params }: Params) {
       <MoviePanel detail={detail} now={new Date()} />
     </main>
   );
-}
-</file>
-
-<file path="src/app/globals.css">
-@import "tailwindcss";
-
-/* Palette: cool paper, indigo ink. The loud colours live in lib/seasons.ts (one per month). */
-:root {
-  --ground: #edeff3;
-  --surface: #ffffff;
-  --ink: #1b2140;
-  --muted: #5c6480;
-  --line: #d3d8e2;
-  --line-strong: #b6bdcc;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --ground: #12162a;
-    --surface: #1b2140;
-    --ink: #e9ecf6;
-    --muted: #9aa3be;
-    --line: #2b3358;
-    --line-strong: #434c75;
-  }
-}
-
-@theme inline {
-  --color-ground: var(--ground);
-  --color-surface: var(--surface);
-  --color-ink: var(--ink);
-  --color-muted: var(--muted);
-  --color-line: var(--line);
-  --color-line-strong: var(--line-strong);
-  --font-display: "Bricolage Grotesque Variable", ui-sans-serif, system-ui, sans-serif;
-  --font-sans: "Instrument Sans Variable", ui-sans-serif, system-ui, sans-serif;
-}
-
-body {
-  background: var(--ground);
-  color: var(--ink);
-  font-family: var(--font-sans);
-}
-
-:focus-visible {
-  outline: 2px solid var(--ink);
-  outline-offset: 2px;
-}
-
-/* React Flow: use our palette instead of its defaults */
-.react-flow {
-  --xy-background-color: var(--ground);
-  --xy-edge-stroke-default: var(--line-strong);
-  --xy-controls-button-background-color: var(--surface);
-  --xy-controls-button-background-color-hover: var(--ground);
-  --xy-controls-button-color: var(--ink);
-  --xy-controls-button-border-color: var(--line);
-  --xy-attribution-background-color: transparent;
-}
-.react-flow__node {
-  cursor: pointer;
-}
-
-/* Home screen: soft colour wash behind the hero, and a gentle entrance. */
-.hero-bg {
-  background:
-    radial-gradient(48rem 24rem at 12% -8%, color-mix(in srgb, #2fa66a 16%, transparent), transparent 62%),
-    radial-gradient(44rem 24rem at 100% 8%, color-mix(in srgb, #6a6cf0 18%, transparent), transparent 62%),
-    radial-gradient(40rem 22rem at 55% 115%, color-mix(in srgb, #e3a008 14%, transparent), transparent 62%);
-}
-@keyframes rise {
-  from { opacity: 0; transform: translateY(10px); }
-  to { opacity: 1; transform: none; }
-}
-.rise {
-  animation: rise 0.55s cubic-bezier(0.2, 0.7, 0.2, 1) both;
-}
-@media (prefers-reduced-motion: reduce) {
-  .rise { animation: none; }
 }
 </file>
 
@@ -2422,6 +2627,97 @@ if seasonal_csv.exists():
 print("sample:", q("SELECT movie_id, title, alt_title, year, tmdb_id FROM movies WHERE movie_id IN (1, 2, 11, 3114, 112556)"))
 </file>
 
+<file path="src/app/globals.css">
+@import "tailwindcss";
+
+/* Palette: cool paper, indigo ink. The loud colours live in lib/seasons.ts (one per month). */
+:root {
+  --ground: #edeff3;
+  --surface: #ffffff;
+  --ink: #1b2140;
+  --muted: #5c6480;
+  --line: #d3d8e2;
+  --line-strong: #b6bdcc;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --ground: #12162a;
+    --surface: #1b2140;
+    --ink: #e9ecf6;
+    --muted: #9aa3be;
+    --line: #2b3358;
+    --line-strong: #434c75;
+  }
+}
+
+@theme inline {
+  --color-ground: var(--ground);
+  --color-surface: var(--surface);
+  --color-ink: var(--ink);
+  --color-muted: var(--muted);
+  --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
+  --font-display: "Bricolage Grotesque Variable", ui-sans-serif, system-ui, sans-serif;
+  --font-sans: "Instrument Sans Variable", ui-sans-serif, system-ui, sans-serif;
+}
+
+body {
+  background: var(--ground);
+  color: var(--ink);
+  font-family: var(--font-sans);
+}
+
+:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: 2px;
+}
+
+/* React Flow: use our palette instead of its defaults */
+.react-flow {
+  --xy-background-color: var(--ground);
+  --xy-edge-stroke-default: var(--line-strong);
+  --xy-controls-button-background-color: var(--surface);
+  --xy-controls-button-background-color-hover: var(--ground);
+  --xy-controls-button-color: var(--ink);
+  --xy-controls-button-border-color: var(--line);
+  --xy-attribution-background-color: transparent;
+}
+.react-flow__node {
+  cursor: pointer;
+}
+
+/* Home screen: soft colour wash behind the hero, and a gentle entrance. */
+.hero-bg {
+  background:
+    radial-gradient(48rem 24rem at 12% -8%, color-mix(in srgb, #2fa66a 16%, transparent), transparent 62%),
+    radial-gradient(44rem 24rem at 100% 8%, color-mix(in srgb, #6a6cf0 18%, transparent), transparent 62%),
+    radial-gradient(40rem 22rem at 55% 115%, color-mix(in srgb, #e3a008 14%, transparent), transparent 62%);
+}
+@keyframes rise {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: none; }
+}
+.rise {
+  animation: rise 0.55s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+@media (prefers-reduced-motion: reduce) {
+  .rise { animation: none; }
+}
+
+/* Graph nodes: pop in with a little overshoot. */
+@keyframes bubble-in {
+  from { opacity: 0; transform: scale(0.2); }
+  to { opacity: 1; transform: none; }
+}
+.bubble-in {
+  animation: bubble-in 0.6s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+}
+@media (prefers-reduced-motion: reduce) {
+  .bubble-in { animation: none; }
+}
+</file>
+
 <file path="src/components/GradeLegend.tsx">
 "use client";
 
@@ -3215,288 +3511,6 @@ export function Explorer({
 }
 </file>
 
-<file path="src/components/MeshCanvas.tsx">
-"use client";
-
-import { useCallback, useEffect, useRef, useSyncExternalStore } from "react";
-import {
-  Background,
-  Controls,
-  ReactFlow,
-  ReactFlowProvider,
-  useEdgesState,
-  useNodesState,
-  useReactFlow,
-  type Edge,
-  type ColorMode,
-  type Node,
-  type NodeMouseHandler,
-} from "@xyflow/react";
-import "@xyflow/react/dist/style.css";
-import { findLinks, spotAside, spotNear } from "@/lib/links";
-import type { ExpandResponse, MeshMovieData, MeshNodeData, TmdbStatus } from "@/lib/types";
-import { MovieNode } from "./nodes";
-
-type FlowNode = Node<MeshNodeData>;
-const nodeTypes = { movie: MovieNode };
-
-type Point = { x: number; y: number };
-
-// React Flow wants to know light vs dark. The server can't know the visitor's setting, so it
-// renders "light" and the client switches right after hydrating (reading it during render would
-// make the server and client HTML differ, which is the hydration error).
-const DARK_QUERY = "(prefers-color-scheme: dark)";
-function subscribeColorMode(cb: () => void) {
-  const mq = window.matchMedia(DARK_QUERY);
-  mq.addEventListener("change", cb);
-  return () => mq.removeEventListener("change", cb);
-}
-const clientColorMode = (): ColorMode => (window.matchMedia(DARK_QUERY).matches ? "dark" : "light");
-const serverColorMode = (): ColorMode => "light";
-
-/** Fan new nodes out around `center`, away from the node it was reached from. */
-function place(center: Point, from: Point | null, count: number): Point[] {
-  if (!count) return [];
-  const radius = 280 + count * 14;
-  const full = !from;
-  const base = from ? Math.atan2(center.y - from.y, center.x - from.x) : -Math.PI / 2;
-  const arc = full ? Math.PI * 2 : Math.min(Math.PI * 1.2, 0.55 * count + 0.4);
-  return Array.from({ length: count }, (_, i) => {
-    const a = full ? base + (arc * i) / count : base - arc / 2 + (arc * (i + 0.5)) / count;
-    return { x: center.x + Math.cos(a) * radius, y: center.y + Math.sin(a) * radius };
-  });
-}
-
-/** Ask the mesh to reveal a movie: zoom to it if it's on the canvas, otherwise add it. */
-export type Focus = { data: MeshMovieData; nonce: number };
-
-type Props = {
-  root: MeshMovieData;
-  focus: Focus | null;
-  onSelect: (data: MeshNodeData) => void;
-  onTmdb: (status: TmdbStatus) => void;
-  onError: (message: string) => void;
-  /** False when the person switched TMDB off: skip posters. */
-  useTmdb: boolean;
-};
-
-/** Mount with a `key` of the root movie (and the TMDB setting) so changing either starts a fresh mesh. */
-export function MeshCanvas(props: Props) {
-  return (
-    <ReactFlowProvider>
-      <Mesh {...props} />
-    </ReactFlowProvider>
-  );
-}
-
-function Mesh({ root, focus, onSelect, onTmdb, onError, useTmdb }: Props) {
-  const [nodes, setNodes, onNodesChange] = useNodesState<FlowNode>([
-    { id: `m:${root.movieId}`, type: "movie", position: { x: 0, y: 0 }, data: root },
-  ]);
-  const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
-  const colorMode = useSyncExternalStore(subscribeColorMode, clientColorMode, serverColorMode);
-  const { fitView, getNodes } = useReactFlow();
-  const handledFocus = useRef(0);
-  const expanded = useRef(new Set<string>());
-  const parents = useRef(new Map<string, string>());
-
-  const fit = useCallback(() => {
-    const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    window.setTimeout(() => void fitView({ padding: 0.25, maxZoom: 1, duration: reduce ? 0 : 450 }), 80);
-  }, [fitView]);
-
-  const expand = useCallback(
-    async (node: FlowNode) => {
-      const id = node.id;
-      if (expanded.current.has(id)) return;
-      expanded.current.add(id);
-      const setLoading = (loading: boolean) =>
-        setNodes((ns) => ns.map((n) => (n.id === id ? { ...n, data: { ...n.data, loading } } : n)));
-      setLoading(true);
-      try {
-        const res = await fetch(`/api/expand?id=${node.data.movieId}${useTmdb ? "" : "&tmdb=0"}`);
-        const body = await res.json();
-        if (!res.ok) throw new Error(body.error ?? "Couldn't load connections.");
-        const data = body as ExpandResponse;
-        onTmdb(data.tmdb);
-
-        setNodes((ns) => {
-          const have = new Set(ns.map((n) => n.id));
-          const parent = ns.find((n) => n.id === id);
-          if (!parent) return ns;
-          const grand = ns.find((n) => n.id === parents.current.get(id));
-          const fresh = data.nodes.filter((n) => !have.has(n.id));
-          const spots = place(parent.position, grand?.position ?? null, fresh.length);
-          fresh.forEach((n) => parents.current.set(n.id, id));
-          return [...ns, ...fresh.map((n, i) => ({ id: n.id, type: "movie", position: spots[i], data: n }))];
-        });
-        setEdges((es) => {
-          const have = new Set(es.map((e) => e.id));
-          const add = data.edges
-            .map((e) => ({ id: `${e.source}>${e.target}`, source: e.source, target: e.target }))
-            .filter((e) => !have.has(e.id) && !have.has(`${e.target}>${e.source}`));
-          return [...es, ...add];
-        });
-        if (data.nodes.length) fit();
-      } catch (e) {
-        expanded.current.delete(id);
-        onError(e instanceof Error ? e.message : "Couldn't load connections.");
-      } finally {
-        setLoading(false);
-      }
-    },
-    [fit, onError, onTmdb, setEdges, setNodes, useTmdb],
-  );
-
-  // Grow the first node once, as soon as the mesh appears.
-  useEffect(() => {
-    const t = setTimeout(() => void expand(nodes[0]), 0);
-    return () => clearTimeout(t);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  // Reveal a movie picked from outside the canvas (e.g. My list).
-  useEffect(() => {
-    if (!focus || handledFocus.current === focus.nonce) return;
-    const t = setTimeout(() => {
-      handledFocus.current = focus.nonce;
-      const id = `m:${focus.data.movieId}`;
-      const current = getNodes() as FlowNode[];
-      const existing = current.find((n) => n.id === id);
-      let shown: MeshNodeData = existing ? existing.data : focus.data;
-
-      if (!existing) {
-        const links = findLinks(focus.data, current);
-        const anchor = links.length ? current.find((n) => n.id === links[0].nodeId) : undefined;
-        const others = current.map((n) => n.position);
-        const grand = anchor ? current.find((n) => n.id === parents.current.get(anchor.id)) : undefined;
-        const position = anchor ? spotNear(anchor.position, grand?.position ?? null, others) : spotAside(others);
-        shown = { ...focus.data, via: links.length ? `Similar: ${links[0].via}` : "From your list (not linked to anything here yet)" };
-        if (anchor) parents.current.set(id, anchor.id);
-        setNodes((ns) => [...ns, { id, type: "movie", position, data: shown }]);
-        setEdges((es) => [
-          ...es,
-          ...links.map((l) => ({ id: `${l.nodeId}>${id}`, source: l.nodeId, target: id })),
-        ]);
-      }
-      setNodes((ns) => ns.map((n) => ({ ...n, selected: n.id === id })));
-      onSelect(shown);
-      const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-      // let React Flow measure the new node before zooming to it
-      window.setTimeout(() => void fitView({ nodes: [{ id }], padding: 1.2, maxZoom: 1, duration: reduce ? 0 : 500 }), 120);
-    }, 0);
-    return () => clearTimeout(t);
-  }, [focus, fitView, getNodes, onSelect, setEdges, setNodes]);
-
-  const onNodeClick: NodeMouseHandler<FlowNode> = useCallback(
-    (_, node) => {
-      onSelect(node.data);
-      void expand(node);
-    },
-    [expand, onSelect],
-  );
-
-  return (
-    <ReactFlow
-      nodes={nodes}
-      edges={edges}
-      onNodesChange={onNodesChange}
-      onEdgesChange={onEdgesChange}
-      nodeTypes={nodeTypes}
-      onNodeClick={onNodeClick}
-      nodesConnectable={false}
-      defaultEdgeOptions={{ type: "straight", style: { strokeWidth: 1.5 } }}
-      fitView
-      fitViewOptions={{ padding: 0.4, maxZoom: 1 }}
-      minZoom={0.2}
-      maxZoom={1.5}
-      colorMode={colorMode}
-    >
-      <Background gap={28} size={1} color="var(--line)" />
-      <Controls showInteractive={false} />
-    </ReactFlow>
-  );
-}
-</file>
-
-<file path="src/components/nodes.tsx">
-"use client";
-/* eslint-disable @next/next/no-img-element */
-
-import { useMemo } from "react";
-import { Handle, Position, type Node, type NodeProps } from "@xyflow/react";
-import { imageUrl } from "@/lib/images";
-import { useLibrary } from "@/lib/library";
-import { scoreMovie } from "@/lib/score";
-import type { MeshMovieData } from "@/lib/types";
-
-// Edges run centre to centre, so both handles sit invisibly in the middle of the node.
-const anchor = { opacity: 0, pointerEvents: "none" as const, left: "50%", top: "50%" };
-const Anchors = () => (
-  <>
-    <Handle type="target" position={Position.Top} style={anchor} />
-    <Handle type="source" position={Position.Top} style={anchor} />
-  </>
-);
-
-export function MovieNode({ data, selected }: NodeProps<Node<MeshMovieData, "movie">>) {
-  const lib = useLibrary();
-  const scored = useMemo(() => scoreMovie(data, lib, new Date()), [data, lib]);
-  const { tier } = scored;
-  const color = tier.color;
-  const poster = imageUrl(data.posterPath, "w92");
-  return (
-    <div
-      className="relative flex w-44 items-center gap-2.5 rounded-lg bg-surface p-2 text-left"
-      style={{
-        border: `3px ${tier.dashed ? "dashed" : "solid"} ${color}`,
-        boxShadow: selected
-          ? "0 0 0 3px var(--ink)"
-          : tier.id === "now"
-            ? `0 0 0 5px color-mix(in srgb, ${color} 30%, transparent)`
-            : "0 1px 2px rgb(0 0 0 / 0.1)",
-      }}
-    >
-      <Anchors />
-      {scored.status && (
-        <span
-          aria-label={scored.status === "watched" ? "Watched" : "On your plan-to-watch list"}
-          className="absolute -right-2 -top-2 grid h-5 w-5 place-items-center rounded-full bg-ink text-[11px] leading-none text-surface"
-        >
-          {scored.status === "watched" ? "✓" : "+"}
-        </span>
-      )}
-      {poster ? (
-        <img src={poster} alt="" className="h-14 w-10 shrink-0 rounded object-cover" />
-      ) : (
-        <div
-          aria-hidden
-          className="grid h-14 w-10 shrink-0 place-items-center rounded font-display text-base"
-          style={{ background: `color-mix(in srgb, ${color} 25%, var(--surface))` }}
-        >
-          {data.title.slice(0, 1)}
-        </div>
-      )}
-      <div className="min-w-0">
-        <p className="line-clamp-2 text-[13px] font-medium leading-tight">{data.title}</p>
-        <p className="mt-0.5 text-xs text-muted">
-          {data.loading ? "Loading..." : (data.year ?? "")}
-          {!data.loading && scored.status === "watched" && scored.rating !== null && (
-            <span className="font-semibold text-ink"> · {"★".repeat(scored.rating)}</span>
-          )}
-          {!data.loading && scored.score !== null && (
-            <span className="font-semibold" style={{ color }}>
-              {" "}
-              · {scored.score}
-            </span>
-          )}
-        </p>
-      </div>
-    </div>
-  );
-}
-</file>
-
 <file path="src/lib/mesh.ts">
 import { getMovie, getSimilar } from "./catalog";
 import { getTmdbMovie, tmdbEnabled } from "./tmdb";
@@ -3675,6 +3689,249 @@ export type ExpandResponse = {
   edges: { source: string; target: string; via: string }[];
   tmdb: TmdbStatus;
 };
+</file>
+
+<file path="src/components/MeshCanvas.tsx">
+"use client";
+
+import { useCallback, useEffect, useRef, useSyncExternalStore } from "react";
+import {
+  Background,
+  Controls,
+  ReactFlow,
+  ReactFlowProvider,
+  useEdgesState,
+  useNodesState,
+  useReactFlow,
+  type Edge,
+  type ColorMode,
+  type Node,
+  type NodeMouseHandler,
+} from "@xyflow/react";
+import "@xyflow/react/dist/style.css";
+import { findLinks, spotAside, spotNear } from "@/lib/links";
+import { useBubblePhysics } from "@/lib/useBubblePhysics";
+import type { ExpandResponse, MeshMovieData, MeshNodeData, TmdbStatus } from "@/lib/types";
+import { MovieNode } from "./nodes";
+
+type FlowNode = Node<MeshNodeData>;
+const nodeTypes = { movie: MovieNode };
+
+type Point = { x: number; y: number };
+
+// React Flow wants to know light vs dark. The server can't know the visitor's setting, so it
+// renders "light" and the client switches right after hydrating (reading it during render would
+// make the server and client HTML differ, which is the hydration error).
+const DARK_QUERY = "(prefers-color-scheme: dark)";
+function subscribeColorMode(cb: () => void) {
+  const mq = window.matchMedia(DARK_QUERY);
+  mq.addEventListener("change", cb);
+  return () => mq.removeEventListener("change", cb);
+}
+const clientColorMode = (): ColorMode => (window.matchMedia(DARK_QUERY).matches ? "dark" : "light");
+const serverColorMode = (): ColorMode => "light";
+
+/** Fan new nodes out around `center`, away from the node it was reached from. */
+function place(center: Point, from: Point | null, count: number): Point[] {
+  if (!count) return [];
+  const radius = 280 + count * 14;
+  const full = !from;
+  const base = from ? Math.atan2(center.y - from.y, center.x - from.x) : -Math.PI / 2;
+  const arc = full ? Math.PI * 2 : Math.min(Math.PI * 1.2, 0.55 * count + 0.4);
+  return Array.from({ length: count }, (_, i) => {
+    const a = full ? base + (arc * i) / count : base - arc / 2 + (arc * (i + 0.5)) / count;
+    return { x: center.x + Math.cos(a) * radius, y: center.y + Math.sin(a) * radius };
+  });
+}
+
+/** A point a little way from `a` toward `b`: where a new node starts before it springs out. */
+const nudge = (a: Point, b: Point, t = 0.1): Point => ({ x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t });
+
+/** Ask the mesh to reveal a movie: zoom to it if it's on the canvas, otherwise add it. */
+export type Focus = { data: MeshMovieData; nonce: number };
+
+type Props = {
+  root: MeshMovieData;
+  focus: Focus | null;
+  onSelect: (data: MeshNodeData) => void;
+  onTmdb: (status: TmdbStatus) => void;
+  onError: (message: string) => void;
+  /** False when the person switched TMDB off: skip posters. */
+  useTmdb: boolean;
+};
+
+/** Mount with a `key` of the root movie (and the TMDB setting) so changing either starts a fresh mesh. */
+export function MeshCanvas(props: Props) {
+  return (
+    <ReactFlowProvider>
+      <Mesh {...props} />
+    </ReactFlowProvider>
+  );
+}
+
+function Mesh({ root, focus, onSelect, onTmdb, onError, useTmdb }: Props) {
+  const [nodes, setNodes, onNodesChange] = useNodesState<FlowNode>([
+    { id: `m:${root.movieId}`, type: "movie", position: { x: 0, y: 0 }, data: root },
+  ]);
+  const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
+  const colorMode = useSyncExternalStore(subscribeColorMode, clientColorMode, serverColorMode);
+  const { fitView, getNodes } = useReactFlow();
+  const handledFocus = useRef(0);
+  const expanded = useRef(new Set<string>());
+  const parents = useRef(new Map<string, string>());
+
+  const fit = useCallback(() => {
+    const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    window.setTimeout(() => void fitView({ padding: 0.25, maxZoom: 1, duration: reduce ? 0 : 450 }), 80);
+  }, [fitView]);
+
+  // What to do with the camera once new nodes have finished springing into place. Nodes are still
+  // moving right after they're added, so framing them any earlier would aim at the wrong spots.
+  const afterSettle = useRef<(() => void) | null>(null);
+  const onSettle = useCallback(() => {
+    const run = afterSettle.current;
+    afterSettle.current = null;
+    if (run) run();
+    else fit();
+  }, [fit]);
+  const physics = useBubblePhysics<FlowNode>(setNodes, onSettle);
+
+  const expand = useCallback(
+    async (node: FlowNode) => {
+      const id = node.id;
+      if (expanded.current.has(id)) return;
+      expanded.current.add(id);
+      const setLoading = (loading: boolean) =>
+        setNodes((ns) => ns.map((n) => (n.id === id ? { ...n, data: { ...n.data, loading } } : n)));
+      setLoading(true);
+      try {
+        const res = await fetch(`/api/expand?id=${node.data.movieId}${useTmdb ? "" : "&tmdb=0"}`);
+        const body = await res.json();
+        if (!res.ok) throw new Error(body.error ?? "Couldn't load connections.");
+        const data = body as ExpandResponse;
+        onTmdb(data.tmdb);
+
+        const current = getNodes() as FlowNode[];
+        const parent = current.find((n) => n.id === id);
+        let launched = 0;
+        if (parent) {
+          const have = new Set(current.map((n) => n.id));
+          const grand = current.find((n) => n.id === parents.current.get(id));
+          const fresh = data.nodes.filter((n) => !have.has(n.id));
+          const spots = place(parent.position, grand?.position ?? null, fresh.length);
+          afterSettle.current = null; // the latest expansion decides how the camera frames things
+          // New nodes start just off their parent and spring out to their spots.
+          const added: FlowNode[] = fresh.map((n, i) => {
+            parents.current.set(n.id, id);
+            physics.launch(n.id, spots[i], id);
+            return { id: n.id, type: "movie", position: nudge(parent.position, spots[i]), data: n };
+          });
+          launched = added.length;
+          setNodes((ns) => {
+            const ids = new Set(ns.map((n) => n.id));
+            return [...ns, ...added.filter((n) => !ids.has(n.id))];
+          });
+        }
+        setEdges((es) => {
+          const have = new Set(es.map((e) => e.id));
+          const add = data.edges
+            .map((e) => ({ id: `${e.source}>${e.target}`, source: e.source, target: e.target }))
+            .filter((e) => !have.has(e.id) && !have.has(`${e.target}>${e.source}`));
+          return [...es, ...add];
+        });
+        // With new nodes the camera follows once they settle (see onSettle); otherwise frame now.
+        if (data.nodes.length && !launched) fit();
+      } catch (e) {
+        expanded.current.delete(id);
+        onError(e instanceof Error ? e.message : "Couldn't load connections.");
+      } finally {
+        setLoading(false);
+      }
+    },
+    [fit, getNodes, onError, onTmdb, physics, setEdges, setNodes, useTmdb],
+  );
+
+  // Grow the first node once, as soon as the mesh appears.
+  useEffect(() => {
+    const t = setTimeout(() => void expand(nodes[0]), 0);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Reveal a movie picked from outside the canvas (e.g. My list).
+  useEffect(() => {
+    if (!focus || handledFocus.current === focus.nonce) return;
+    const t = setTimeout(() => {
+      handledFocus.current = focus.nonce;
+      const id = `m:${focus.data.movieId}`;
+      const current = getNodes() as FlowNode[];
+      const existing = current.find((n) => n.id === id);
+      let shown: MeshNodeData = existing ? existing.data : focus.data;
+      const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+      if (!existing) {
+        const links = findLinks(focus.data, current);
+        const anchor = links.length ? current.find((n) => n.id === links[0].nodeId) : undefined;
+        const others = current.map((n) => n.position);
+        const grand = anchor ? current.find((n) => n.id === parents.current.get(anchor.id)) : undefined;
+        const position = anchor ? spotNear(anchor.position, grand?.position ?? null, others) : spotAside(others);
+        shown = { ...focus.data, via: links.length ? `Similar: ${links[0].via}` : "From your list (not linked to anything here yet)" };
+        if (anchor) parents.current.set(id, anchor.id);
+        setNodes((ns) => [
+          ...ns,
+          { id, type: "movie", position: anchor ? nudge(anchor.position, position) : position, data: shown },
+        ]);
+        setEdges((es) => [
+          ...es,
+          ...links.map((l) => ({ id: `${l.nodeId}>${id}`, source: l.nodeId, target: id })),
+        ]);
+        // Zoom to it once it has finished springing into place (and nudged its neighbours aside).
+        afterSettle.current = () =>
+          void fitView({ nodes: [{ id }], padding: 1.2, maxZoom: 1, duration: reduce ? 0 : 500 });
+        physics.launch(id, position, anchor?.id ?? null);
+      }
+      setNodes((ns) => ns.map((n) => ({ ...n, selected: n.id === id })));
+      onSelect(shown);
+      if (existing) {
+        window.setTimeout(() => void fitView({ nodes: [{ id }], padding: 1.2, maxZoom: 1, duration: reduce ? 0 : 500 }), 120);
+      }
+    }, 0);
+    return () => clearTimeout(t);
+  }, [focus, fitView, getNodes, onSelect, physics, setEdges, setNodes]);
+
+  const onNodeClick: NodeMouseHandler<FlowNode> = useCallback(
+    (_, node) => {
+      onSelect(node.data);
+      void expand(node);
+    },
+    [expand, onSelect],
+  );
+
+  return (
+    <ReactFlow
+      nodes={nodes}
+      edges={edges}
+      onNodesChange={onNodesChange}
+      onEdgesChange={onEdgesChange}
+      nodeTypes={nodeTypes}
+      onNodeClick={onNodeClick}
+      // Dragging a node pins it; everything it runs into gets pushed out of the way, live.
+      onNodeDragStart={(_, node) => physics.pin(node.id)}
+      onNodeDrag={() => physics.wake()}
+      onNodeDragStop={(_, node) => physics.unpin(node.id)}
+      nodesConnectable={false}
+      defaultEdgeOptions={{ type: "straight", style: { strokeWidth: 1.5 } }}
+      fitView
+      fitViewOptions={{ padding: 0.4, maxZoom: 1 }}
+      minZoom={0.2}
+      maxZoom={1.5}
+      colorMode={colorMode}
+    >
+      <Background gap={28} size={1} color="var(--line)" />
+      <Controls showInteractive={false} />
+    </ReactFlow>
+  );
+}
 </file>
 
 <file path="src/components/MoviePanel.tsx">
@@ -3912,6 +4169,84 @@ export function MoviePanel({
         </p>
       )}
     </article>
+  );
+}
+</file>
+
+<file path="src/components/nodes.tsx">
+"use client";
+/* eslint-disable @next/next/no-img-element */
+
+import { useMemo } from "react";
+import { Handle, Position, type Node, type NodeProps } from "@xyflow/react";
+import { imageUrl } from "@/lib/images";
+import { useLibrary } from "@/lib/library";
+import { scoreMovie } from "@/lib/score";
+import type { MeshMovieData } from "@/lib/types";
+
+// Edges run centre to centre, so both handles sit invisibly in the middle of the node.
+const anchor = { opacity: 0, pointerEvents: "none" as const, left: "50%", top: "50%" };
+const Anchors = () => (
+  <>
+    <Handle type="target" position={Position.Top} style={anchor} />
+    <Handle type="source" position={Position.Top} style={anchor} />
+  </>
+);
+
+export function MovieNode({ data, selected }: NodeProps<Node<MeshMovieData, "movie">>) {
+  const lib = useLibrary();
+  const scored = useMemo(() => scoreMovie(data, lib, new Date()), [data, lib]);
+  const { tier } = scored;
+  const color = tier.color;
+  const poster = imageUrl(data.posterPath, "w92");
+  return (
+    <div
+      className="bubble-in relative flex w-44 items-center gap-2.5 rounded-lg bg-surface p-2 text-left"
+      style={{
+        border: `3px ${tier.dashed ? "dashed" : "solid"} ${color}`,
+        boxShadow: selected
+          ? "0 0 0 3px var(--ink)"
+          : tier.id === "now"
+            ? `0 0 0 5px color-mix(in srgb, ${color} 30%, transparent)`
+            : "0 1px 2px rgb(0 0 0 / 0.1)",
+      }}
+    >
+      <Anchors />
+      {scored.status && (
+        <span
+          aria-label={scored.status === "watched" ? "Watched" : "On your plan-to-watch list"}
+          className="absolute -right-2 -top-2 grid h-5 w-5 place-items-center rounded-full bg-ink text-[11px] leading-none text-surface"
+        >
+          {scored.status === "watched" ? "✓" : "+"}
+        </span>
+      )}
+      {poster ? (
+        <img src={poster} alt="" className="h-14 w-10 shrink-0 rounded object-cover" />
+      ) : (
+        <div
+          aria-hidden
+          className="grid h-14 w-10 shrink-0 place-items-center rounded font-display text-base"
+          style={{ background: `color-mix(in srgb, ${color} 25%, var(--surface))` }}
+        >
+          {data.title.slice(0, 1)}
+        </div>
+      )}
+      <div className="min-w-0">
+        <p className="line-clamp-2 text-[13px] font-medium leading-tight">{data.title}</p>
+        <p className="mt-0.5 text-xs text-muted">
+          {data.loading ? "Loading..." : (data.year ?? "")}
+          {!data.loading && scored.status === "watched" && scored.rating !== null && (
+            <span className="font-semibold text-ink"> · {"★".repeat(scored.rating)}</span>
+          )}
+          {!data.loading && scored.score !== null && (
+            <span className="font-semibold" style={{ color }}>
+              {" "}
+              · {scored.score}
+            </span>
+          )}
+        </p>
+      </div>
+    </div>
   );
 }
 </file>
