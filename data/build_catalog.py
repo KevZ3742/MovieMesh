@@ -8,8 +8,10 @@ Tables
   seasonal_movies(movie_id, peak_month, lift, n, peak_years)   -- only if seasonal_movies.csv exists
   movies_fts                                -- full-text search over title + alt_title (if SQLite has FTS5)
 
-Usage:  python build_catalog.py [path/to/ml-32m] [--ratings]
-  --ratings   also read ratings.csv to fill n_ratings / avg_rating (slow-ish; adds a popularity signal)
+Usage:  python build_catalog.py [path/to/ml-32m] [--no-ratings]
+  Ratings are read from ratings.csv by default, to fill n_ratings / avg_rating (this is what the app's Rating
+  score and popularity ranking use). It adds a few minutes because ratings.csv has ~32M rows.
+  --no-ratings   skip ratings.csv for a faster build. Rating data will be empty in the app.
 Output: data/catalog.db if a data/ folder exists in the current folder, otherwise ./catalog.db.
 """
 import re
@@ -25,7 +27,7 @@ MIN_TAGGERS = 3       # a tag must come from >= this many distinct users for tha
 TAGS_PER_MOVIE = 20   # keep the most-agreed-upon tags per movie
 
 args = [a for a in sys.argv[1:] if not a.startswith("--")]
-use_ratings = "--ratings" in sys.argv
+use_ratings = "--no-ratings" not in sys.argv
 def find_data_root(arg):
     """Find the folder holding movies.csv. Tries: the path given, ./ml-32m, ./data/ml-32m, ./data."""
     base = Path(arg) if arg else Path(".")
@@ -40,7 +42,8 @@ root = find_data_root(args[0] if args else None)
 print(f"Using data in {root.resolve()}")
 for f in ("movies.csv", "links.csv", "tags.csv") + (("ratings.csv",) if use_ratings else ()):
     if not (root / f).exists():
-        sys.exit(f"Can't find {f} in {root.resolve()}.")
+        hint = "  (Ratings are on by default. Pass --no-ratings to build without them.)" if f == "ratings.csv" else ""
+        sys.exit(f"Can't find {f} in {root.resolve()}.{hint}")
 
 # ---------- movies ----------
 ARTICLE = re.compile(r"^(.*), (The|A|An|Les|La|Le|Los|Las|El|Il|Der|Die|Das|L')$")
@@ -162,6 +165,12 @@ print(f"  movies with >=1 tag: {agg.movie_id.nunique():,} | distinct tags kept: 
 print(f"  no genres but has tags (tags can fill the gap): "
       f"{q('SELECT COUNT(*) FROM movies WHERE movie_id NOT IN (SELECT movie_id FROM movie_genres) AND movie_id IN (SELECT movie_id FROM movie_tags)')[0][0]:,}")
 print("  most common tags:", ", ".join(f"{t} ({n})" for t, n in q("SELECT tag, COUNT(*) c FROM movie_tags GROUP BY tag ORDER BY c DESC LIMIT 25")))
+n_rated = q("SELECT COUNT(*) FROM movies WHERE avg_rating IS NOT NULL")[0][0]
+if use_ratings:
+    print(f"ratings: {n_rated:,} movies have n_ratings / avg_rating")
+else:
+    print("ratings: NONE. Built with --no-ratings, so the app's Rating score and popularity ranking will be empty.")
+    print("         Re-run without that flag (needs ratings.csv in the same folder as movies.csv).")
 print("full-text search:", "yes" if fts else "no (this SQLite build lacks FTS5)")
 if seasonal_csv.exists():
     print(f"seasonal_movies: {q('SELECT COUNT(*) FROM seasonal_movies')[0][0]:,}")

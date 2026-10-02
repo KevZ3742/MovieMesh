@@ -44,15 +44,22 @@ export function MoviePanel({
   /** The explorer already shows one TMDB notice over the canvas, so it turns this one off. */
   showTmdbNote?: boolean;
 }) {
-  const { movie, when, tmdb, tmdbStatus } = detail;
+  const { movie, when, tmdb, tmdbStatus, ratingsMissing } = detail;
   const lib = useLibrary();
   const features = useMemo(() => featuresOf(movie, when, tmdb?.cast), [movie, when, tmdb]);
   const scored = useMemo(() => scoreMovie(features, lib, now), [features, lib, now]);
   const color = scored.tier.color;
   // Biggest contributors first; indicators that don't apply sink to the bottom.
   const ranked = useMemo(
-    () => [...scored.factors].sort((a, b) => (b.value === null ? -1 : b.points) - (a.value === null ? -1 : a.points)),
-    [scored.factors],
+    () => [...scored.factors]
+      // "No rating data" for one movie is normal; for every movie it means the catalog was built without ratings.
+      .map((f) =>
+        f.key === "quality" && f.value === null && ratingsMissing
+          ? { ...f, reason: "This catalog was built without ratings. Rebuild it without --no-ratings (see data/README.txt)." }
+          : f,
+      )
+      .sort((a, b) => (b.value === null ? -1 : b.points) - (a.value === null ? -1 : a.points)),
+    [scored.factors, ratingsMissing],
   );
   // The spider graph keeps its spokes fixed, except "You", which only exists for movies you've watched.
   const radarFactors = scored.factors.filter((f) => f.key !== "history" || f.value !== null);
@@ -177,7 +184,7 @@ export function MoviePanel({
 
       {tmdb?.overview && <p className="max-w-prose text-sm leading-relaxed">{tmdb.overview}</p>}
       {showTmdbNote && tmdbStatus === "disabled" && (
-        <p className="text-sm text-muted">Posters, summaries and cast need a TMDB key. See the README.</p>
+        <p className="text-sm text-muted">Posters, summaries and cast need a TMDB key. Add one in Settings (gear icon) on the main page.</p>
       )}
       {showTmdbNote && tmdbStatus === "unavailable" && (
         <p className="text-sm text-muted">TMDB didn&apos;t respond for this movie, so posters and cast are hidden for now.</p>

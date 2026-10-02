@@ -6,3 +6,6 @@ export function apiError(err: unknown): Response {
   console.error(err);
   return Response.json({ error: "Something went wrong reading the catalog. Check the server log." }, { status: 500 });
 }
+
+/** Clients send ?tmdb=0 when the person has switched TMDB off. */
+export const wantsTmdb = (sp: URLSearchParams) => sp.get("tmdb") !== "0";

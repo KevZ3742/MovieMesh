@@ -1,19 +1,21 @@
-import { getMovie, getStarters } from "./catalog";
+import { catalogHasRatings, getMovie, getStarters } from "./catalog";
 import { featuresOf } from "./score";
 import { getTmdbMovie, tmdbEnabled } from "./tmdb";
 import type { MovieDetail, Starter } from "./types";
 import { computeWhen } from "./when";
 
 /** Everything the UI needs about one movie. Server-only (reads the catalog, may call TMDB). */
-export async function loadMovieDetail(id: number): Promise<MovieDetail | null> {
+export async function loadMovieDetail(id: number, useTmdb = true): Promise<MovieDetail | null> {
   const movie = getMovie(id);
   if (!movie) return null;
-  const tmdb = movie.tmdbId ? await getTmdbMovie(movie.tmdbId) : null;
+  const enabled = await tmdbEnabled();
+  const tmdb = enabled && useTmdb && movie.tmdbId ? await getTmdbMovie(movie.tmdbId) : null;
   return {
     movie,
     when: computeWhen(movie),
     tmdb,
-    tmdbStatus: !tmdbEnabled() ? "disabled" : tmdb ? "ok" : "unavailable",
+    ratingsMissing: !catalogHasRatings(),
+    tmdbStatus: !enabled ? "disabled" : !useTmdb ? "off" : tmdb ? "ok" : "unavailable",
   };
 }
 

@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { cookies } from "next/headers";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { MoviePanel } from "@/components/MoviePanel";
@@ -6,6 +7,7 @@ import { SetupMessage } from "@/components/SetupMessage";
 import { getMovie } from "@/lib/catalog";
 import { CatalogMissingError } from "@/lib/db";
 import { loadMovieDetail } from "@/lib/detail";
+import { TMDB_COOKIE } from "@/lib/prefs";
 import type { MovieDetail } from "@/lib/types";
 
 type Params = { params: Promise<{ id: string }> };
@@ -27,7 +29,7 @@ export default async function MoviePage({ params }: Params) {
   let detail: MovieDetail | null = null;
   let setupError: string | null = null;
   try {
-    detail = await loadMovieDetail(id);
+    detail = await loadMovieDetail(id, (await cookies()).get(TMDB_COOKIE)?.value !== "0");
   } catch (err) {
     if (!(err instanceof CatalogMissingError)) throw err;
     setupError = err.message;

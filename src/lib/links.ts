@@ -5,7 +5,7 @@ import type { MovieFeatures } from "./types";
 
 export type Link = { nodeId: string; via: string; score: number };
 
-/** At most this many movie-to-movie links for one new node; actors it appears with are all linked. */
+/** At most this many links for one new node. */
 export const MAX_MOVIE_LINKS = 3;
 
 /** Same ingredients as the server's getSimilar, but a yes/no with a reason. */
@@ -29,23 +29,18 @@ export function movieLink(a: MovieFeatures, b: MovieFeatures): { via: string; sc
   };
 }
 
-type NodeLike = { id: string; data: { kind: "movie" | "person"; movieId?: number; personId?: number } & Partial<MovieFeatures> };
+type NodeLike = { id: string; data: Partial<MovieFeatures> };
 
 /** Which existing nodes should the new movie connect to? Empty means "leave it unconnected". */
-export function findLinks(movie: MovieFeatures, castIds: number[], nodes: NodeLike[]): Link[] {
-  const cast = new Set(castIds);
-  const people: Link[] = [];
+export function findLinks(movie: MovieFeatures, nodes: NodeLike[]): Link[] {
   const movies: Link[] = [];
   for (const n of nodes) {
-    if (n.data.kind === "person") {
-      if (n.data.personId != null && cast.has(n.data.personId)) people.push({ nodeId: n.id, via: "cast", score: 1 });
-    } else if (n.data.movieId !== movie.movieId) {
-      const l = movieLink(movie, n.data as MovieFeatures);
-      if (l) movies.push({ nodeId: n.id, ...l });
-    }
+    if (n.data.movieId === movie.movieId) continue;
+    const l = movieLink(movie, n.data as MovieFeatures);
+    if (l) movies.push({ nodeId: n.id, ...l });
   }
   movies.sort((a, b) => b.score - a.score);
-  return [...movies.slice(0, MAX_MOVIE_LINKS), ...people];
+  return movies.slice(0, MAX_MOVIE_LINKS);
 }
 
 type Pt = { x: number; y: number };

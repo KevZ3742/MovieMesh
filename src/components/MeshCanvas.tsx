@@ -17,10 +17,10 @@ import {
 import "@xyflow/react/dist/style.css";
 import { findLinks, spotAside, spotNear } from "@/lib/links";
 import type { ExpandResponse, MeshMovieData, MeshNodeData, TmdbStatus } from "@/lib/types";
-import { MovieNode, PersonNode } from "./nodes";
+import { MovieNode } from "./nodes";
 
 type FlowNode = Node<MeshNodeData>;
-const nodeTypes = { movie: MovieNode, person: PersonNode };
+const nodeTypes = { movie: MovieNode };
 
 type Point = { x: number; y: number };
 
@@ -50,7 +50,7 @@ function place(center: Point, from: Point | null, count: number): Point[] {
 }
 
 /** Ask the mesh to reveal a movie: zoom to it if it's on the canvas, otherwise add it. */
-export type Focus = { data: MeshMovieData; castIds: number[]; nonce: number };
+export type Focus = { data: MeshMovieData; nonce: number };
 
 type Props = {
   root: MeshMovieData;
@@ -58,9 +58,11 @@ type Props = {
   onSelect: (data: MeshNodeData) => void;
   onTmdb: (status: TmdbStatus) => void;
   onError: (message: string) => void;
+  /** False when the person switched TMDB off: skip posters. */
+  useTmdb: boolean;
 };
 
-/** Mount with `key={root.movieId}` so choosing a new movie starts a fresh mesh. */
+/** Mount with a `key` of the root movie (and the TMDB setting) so changing either starts a fresh mesh. */
 export function MeshCanvas(props: Props) {
   return (
     <ReactFlowProvider>
@@ -69,7 +71,7 @@ export function MeshCanvas(props: Props) {
   );
 }
 
-function Mesh({ root, focus, onSelect, onTmdb, onError }: Props) {
+function Mesh({ root, focus, onSelect, onTmdb, onError, useTmdb }: Props) {
   const [nodes, setNodes, onNodesChange] = useNodesState<FlowNode>([
     { id: `m:${root.movieId}`, type: "movie", position: { x: 0, y: 0 }, data: root },
   ]);
@@ -94,12 +96,7 @@ function Mesh({ root, focus, onSelect, onTmdb, onError }: Props) {
         setNodes((ns) => ns.map((n) => (n.id === id ? { ...n, data: { ...n.data, loading } } : n)));
       setLoading(true);
       try {
-        const d = node.data;
-        const url =
-          d.kind === "movie"
-            ? `/api/expand?type=movie&id=${d.movieId}`
-            : `/api/expand?type=person&id=${d.personId}&name=${encodeURIComponent(d.name)}`;
-        const res = await fetch(url);
+        const res = await fetch(`/api/expand?id=${node.data.movieId}${useTmdb ? "" : "&tmdb=0"}`);
         const body = await res.json();
         if (!res.ok) throw new Error(body.error ?? "Couldn't load connections.");
         const data = body as ExpandResponse;
@@ -113,7 +110,7 @@ function Mesh({ root, focus, onSelect, onTmdb, onError }: Props) {
           const fresh = data.nodes.filter((n) => !have.has(n.id));
           const spots = place(parent.position, grand?.position ?? null, fresh.length);
           fresh.forEach((n) => parents.current.set(n.id, id));
-          return [...ns, ...fresh.map((n, i) => ({ id: n.id, type: n.kind, position: spots[i], data: n }))];
+          return [...ns, ...fresh.map((n, i) => ({ id: n.id, type: "movie", position: spots[i], data: n }))];
         });
         setEdges((es) => {
           const have = new Set(es.map((e) => e.id));
@@ -130,7 +127,7 @@ function Mesh({ root, focus, onSelect, onTmdb, onError }: Props) {
         setLoading(false);
       }
     },
-    [fit, onError, onTmdb, setEdges, setNodes],
+    [fit, onError, onTmdb, setEdges, setNodes, useTmdb],
   );
 
   // Grow the first node once, as soon as the mesh appears.
@@ -151,7 +148,7 @@ function Mesh({ root, focus, onSelect, onTmdb, onError }: Props) {
       let shown: MeshNodeData = existing ? existing.data : focus.data;
 
       if (!existing) {
-        const links = findLinks(focus.data, focus.castIds, current);
+        const links = findLinks(focus.data, current);
         const anchor = links.length ? current.find((n) => n.id === links[0].nodeId) : undefined;
         const others = current.map((n) => n.position);
         const grand = anchor ? current.find((n) => n.id === parents.current.get(anchor.id)) : undefined;

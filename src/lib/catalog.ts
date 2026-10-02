@@ -79,22 +79,17 @@ export function searchMovies(q: string, limit = 8): SearchHit[] {
   const g = genresFor(top.map((r) => r.id));
   return top.map((r) => ({ id: r.id, title: r.title, year: r.year, genres: g.get(r.id) ?? [] }));
 }
-
-export function getMoviesByTmdbIds(tmdbIds: number[]): MovieSummary[] {
-  if (!tmdbIds.length) return [];
-  const rows = getDb()
-    .prepare(`SELECT movie_id id, title, year, tmdb_id tmdbId FROM movies WHERE tmdb_id IN (${ph(tmdbIds.length)})`)
-    .all(...tmdbIds) as Omit<MovieSummary, "genres">[];
-  const g = genresFor(rows.map((r) => r.id));
-  const order = new Map(tmdbIds.map((id, i) => [id, i]));
-  return rows
-    .map((r) => ({ ...r, genres: g.get(r.id) ?? [] }))
-    .sort((a, b) => order.get(a.tmdbId!)! - order.get(b.tmdbId!)!);
-}
-
 export type SimilarHit = { movie: MovieSummary; via: string; score: number };
 
 let hasPopularity: boolean | null = null;
+
+/** True when catalog.db was built with `--ratings` (movies carry n_ratings / avg_rating). */
+export function catalogHasRatings(): boolean {
+  if (hasPopularity === null) {
+    hasPopularity = !!getDb().prepare("SELECT 1 FROM movies WHERE n_ratings IS NOT NULL LIMIT 1").get();
+  }
+  return hasPopularity;
+}
 
 /**
  * Content-based neighbours from shared tags and genres.
@@ -105,9 +100,7 @@ export function getSimilar(id: number, limit = 6): SimilarHit[] {
   const db = getDb();
   const t = getMovie(id);
   if (!t) return [];
-  if (hasPopularity === null) {
-    hasPopularity = !!db.prepare("SELECT 1 FROM movies WHERE n_ratings IS NOT NULL LIMIT 1").get();
-  }
+  const hasPopularity = catalogHasRatings();
 
   const tagNames = t.tags.map((x) => x.tag);
   const cand = new Set<number>();

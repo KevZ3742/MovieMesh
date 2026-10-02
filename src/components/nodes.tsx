@@ -6,7 +6,7 @@ import { Handle, Position, type Node, type NodeProps } from "@xyflow/react";
 import { imageUrl } from "@/lib/images";
 import { useLibrary } from "@/lib/library";
 import { scoreMovie } from "@/lib/score";
-import type { MeshMovieData, MeshPersonData } from "@/lib/types";
+import type { MeshMovieData } from "@/lib/types";
 
 // Edges run centre to centre, so both handles sit invisibly in the middle of the node.
 const anchor = { opacity: 0, pointerEvents: "none" as const, left: "50%", top: "50%" };
@@ -69,32 +69,6 @@ export function MovieNode({ data, selected }: NodeProps<Node<MeshMovieData, "mov
             </span>
           )}
         </p>
-      </div>
-    </div>
-  );
-}
-
-export function PersonNode({ data, selected }: NodeProps<Node<MeshPersonData, "person">>) {
-  const photo = imageUrl(data.profilePath, "w92");
-  return (
-    <div
-      className="flex w-40 items-center gap-2 rounded-full bg-surface py-1.5 pl-1.5 pr-3"
-      style={{
-        border: "2px solid var(--line-strong)",
-        boxShadow: selected ? "0 0 0 3px var(--ink)" : "0 1px 2px rgb(0 0 0 / 0.1)",
-      }}
-    >
-      <Anchors />
-      {photo ? (
-        <img src={photo} alt="" className="h-9 w-9 shrink-0 rounded-full object-cover" />
-      ) : (
-        <div aria-hidden className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-ground text-sm">
-          {data.name.slice(0, 1)}
-        </div>
-      )}
-      <div className="min-w-0">
-        <p className="line-clamp-1 text-xs font-medium">{data.name}</p>
-        <p className="text-[11px] text-muted">{data.loading ? "Loading..." : "Actor"}</p>
       </div>
     </div>
   );

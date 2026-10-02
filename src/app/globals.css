@@ -56,3 +56,21 @@ body {
 .react-flow__node {
   cursor: pointer;
 }
+
+/* Home screen: soft colour wash behind the hero, and a gentle entrance. */
+.hero-bg {
+  background:
+    radial-gradient(48rem 24rem at 12% -8%, color-mix(in srgb, #2fa66a 16%, transparent), transparent 62%),
+    radial-gradient(44rem 24rem at 100% 8%, color-mix(in srgb, #6a6cf0 18%, transparent), transparent 62%),
+    radial-gradient(40rem 22rem at 55% 115%, color-mix(in srgb, #e3a008 14%, transparent), transparent 62%);
+}
+@keyframes rise {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: none; }
+}
+.rise {
+  animation: rise 0.55s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+@media (prefers-reduced-motion: reduce) {
+  .rise { animation: none; }
+}

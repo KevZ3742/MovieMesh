@@ -75,6 +75,7 @@ src/
     MonthStrip.tsx
     MoviePanel.tsx
     nodes.tsx
+    ScoreRadar.tsx
     SearchBox.tsx
     SetupMessage.tsx
   lib/
@@ -88,18 +89,16 @@ src/
     mesh.ts
     score.ts
     seasons.ts
+    streaks.ts
     tmdb.ts
     types.ts
     when.ts
 .env.example
 .gitignore
-AGENTS.md
-CLAUDE.md
 eslint.config.mjs
 next.config.ts
 package.json
 postcss.config.mjs
-README.md
 tsconfig.json
 </directory_structure>
 
@@ -374,106 +373,6 @@ export default async function Home({
 }
 </file>
 
-<file path="src/components/LibraryPanel.tsx">
-"use client";
-
-import { useState } from "react";
-import { setRating, setStatus, useLibrary } from "@/lib/library";
-import type { LibraryEntry, WatchStatus } from "@/lib/types";
-
-const tab = (on: boolean) =>
-  `flex-1 rounded-full border px-3 py-1.5 text-sm ${on ? "border-ink bg-ink text-surface" : "border-line hover:border-line-strong"}`;
-const small = "rounded-full border border-line px-2.5 py-1 text-xs hover:border-line-strong";
-
-const snap = (id: string, e: LibraryEntry) => ({
-  movieId: Number(id),
-  title: e.title,
-  year: e.year,
-  genres: e.genres,
-  tags: e.tags,
-});
-
-const when = (at: number) =>
-  new Date(at).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
-
-/** Your watch history and plan-to-watch list. Only movies you marked yourself appear here. */
-export function LibraryPanel({ onOpen }: { onOpen: (movieId: number) => void }) {
-  const lib = useLibrary();
-  const [which, setWhich] = useState<WatchStatus>("watched");
-  const all = Object.entries(lib);
-  const counts = {
-    watched: all.filter(([, e]) => e.status === "watched").length,
-    planned: all.filter(([, e]) => e.status === "planned").length,
-  };
-  const rows = all.filter(([, e]) => e.status === which).sort((a, b) => b[1].at - a[1].at);
-
-  return (
-    <section aria-label="My list" className="flex flex-col gap-4">
-      <h2 className="font-display text-2xl font-semibold">My list</h2>
-      <div className="flex gap-2" role="group" aria-label="List">
-        <button type="button" aria-pressed={which === "watched"} onClick={() => setWhich("watched")} className={tab(which === "watched")} suppressHydrationWarning>
-          Watched ({counts.watched})
-        </button>
-        <button type="button" aria-pressed={which === "planned"} onClick={() => setWhich("planned")} className={tab(which === "planned")} suppressHydrationWarning>
-          Plan to watch ({counts.planned})
-        </button>
-      </div>
-
-      {rows.length === 0 ? (
-        <p className="text-sm text-muted">
-          {which === "watched"
-            ? "Nothing here yet. Open a movie and press Watched when you've seen it. Clicking nodes in the mesh doesn't count."
-            : "Nothing planned yet. Open a movie and press Plan to watch."}
-        </p>
-      ) : (
-        <ul className="divide-y divide-line">
-          {rows.map(([id, e]) => (
-            <li key={id} className="flex flex-col gap-2 py-3">
-              <div className="flex items-start justify-between gap-3">
-                <button type="button" onClick={() => onOpen(Number(id))} className="min-w-0 text-left">
-                  <span className="block font-medium leading-tight underline-offset-4 hover:underline">{e.title}</span>
-                  <span className="text-xs text-muted">
-                    {e.year ?? ""}
-                    {e.year ? " · " : ""}
-                    {which === "watched" ? "watched" : "added"} {when(e.at)}
-                  </span>
-                </button>
-                {which === "watched" && (
-                  <span className="flex shrink-0 text-base leading-none" role="group" aria-label="Your rating">
-                    {[1, 2, 3, 4, 5].map((n) => (
-                      <button
-                        key={n}
-                        type="button"
-                        aria-label={`Rate ${n} star${n > 1 ? "s" : ""}`}
-                        aria-pressed={e.rating === n}
-                        onClick={() => setRating(snap(id, e), n)}
-                        className={e.rating !== null && n <= e.rating ? "text-ink" : "text-line-strong"}
-                      >
-                        ★
-                      </button>
-                    ))}
-                  </span>
-                )}
-              </div>
-              <div className="flex flex-wrap gap-2">
-                <button type="button" onClick={() => onOpen(Number(id))} className={small}>Open in mesh</button>
-                {which === "planned" && (
-                  <button type="button" onClick={() => setStatus(snap(id, e), "watched")} className={small}>Mark watched</button>
-                )}
-                {which === "watched" && (
-                  <button type="button" onClick={() => setStatus(snap(id, e), "planned")} className={small}>Move to plan</button>
-                )}
-                <button type="button" onClick={() => setStatus(snap(id, e), null)} className={small}>Remove</button>
-              </div>
-            </li>
-          ))}
-        </ul>
-      )}
-    </section>
-  );
-}
-</file>
-
 <file path="src/components/MonthStrip.tsx">
 import { MONTHS, MONTH_COLORS, MONTH_SHORT } from "@/lib/seasons";
 
@@ -501,6 +400,87 @@ export function MonthStrip({ peak = null, all = false, now }: { peak?: number | 
         </div>
       ))}
     </div>
+  );
+}
+</file>
+
+<file path="src/components/ScoreRadar.tsx">
+import { valueColor, type Factor } from "@/lib/score";
+
+const W = 340;
+const H = 280;
+const CX = W / 2;
+const CY = 140;
+const R = 88; // radius of the outer ring (value = 1)
+const RINGS = [0.25, 0.5, 0.75, 1];
+
+const at = (i: number, n: number, r: number) => {
+  const a = -Math.PI / 2 + (2 * Math.PI * i) / n; // first axis points straight up, then clockwise
+  return { x: CX + r * Math.cos(a), y: CY + r * Math.sin(a), cos: Math.cos(a), sin: Math.sin(a) };
+};
+
+/**
+ * Spider graph of the indicators. Each spoke is one indicator, farther out = better for this movie.
+ * Indicators that don't apply sit on the halfway ring, dimmed, and don't count toward the score.
+ */
+export function ScoreRadar({ factors, color }: { factors: Factor[]; color: string }) {
+  const n = factors.length;
+  const shape = factors.map((f, i) => at(i, n, R * (f.value ?? 0.5)));
+  const label = factors
+    .map((f) => (f.value === null ? `${f.label}: not applicable` : `${f.label}: ${Math.round(f.value * 100)} out of 100`))
+    .join(", ");
+
+  return (
+    <svg viewBox={`0 0 ${W} ${H}`} role="img" aria-label={`Spider graph. ${label}`} className="mx-auto w-full max-w-[340px]">
+      {RINGS.map((r) => (
+        <polygon
+          key={r}
+          points={factors.map((_, i) => { const p = at(i, n, R * r); return `${p.x},${p.y}`; }).join(" ")}
+          fill="none"
+          stroke="var(--line)"
+          strokeWidth={r === 1 ? 1.5 : 1}
+        />
+      ))}
+      {factors.map((_, i) => {
+        const p = at(i, n, R);
+        return <line key={i} x1={CX} y1={CY} x2={p.x} y2={p.y} stroke="var(--line)" />;
+      })}
+      <polygon
+        points={shape.map((p) => `${p.x},${p.y}`).join(" ")}
+        fill={color}
+        fillOpacity={0.22}
+        stroke={color}
+        strokeWidth={2}
+        strokeLinejoin="round"
+      />
+      {factors.map((f, i) =>
+        f.value === null ? (
+          <circle key={f.key} cx={shape[i].x} cy={shape[i].y} r={3} fill="var(--surface)" stroke="var(--line-strong)" strokeWidth={1.5} />
+        ) : (
+          <circle key={f.key} cx={shape[i].x} cy={shape[i].y} r={4} fill={valueColor(f.value)} stroke="var(--surface)" strokeWidth={1.5} />
+        ),
+      )}
+      {factors.map((f, i) => {
+        const p = at(i, n, R + 14);
+        const anchor = Math.abs(p.cos) < 0.3 ? "middle" : p.cos > 0 ? "start" : "end";
+        const dy = p.sin < -0.5 ? 0 : p.sin > 0.5 ? 10 : 4;
+        return (
+          <text
+            key={f.key}
+            x={p.x}
+            y={p.y + dy}
+            textAnchor={anchor}
+            fontSize={12}
+            fontWeight={500}
+            fill={f.value === null ? "var(--muted)" : "var(--ink)"}
+            opacity={f.value === null ? 0.6 : 1}
+          >
+            {f.label}
+            {f.value !== null && <tspan fill="var(--muted)" fontWeight={400}>{` ${f.points}`}</tspan>}
+          </text>
+        );
+      })}
+    </svg>
   );
 }
 </file>
@@ -909,92 +889,6 @@ export const imageUrl = (p: string | null, size: "w92" | "w185" | "w342" = "w185
   p ? `https://image.tmdb.org/t/p/${size}${p}` : null;
 </file>
 
-<file path="src/lib/library.ts">
-"use client";
-// Watched / plan-to-watch tracker. Lives in localStorage for now (no accounts needed);
-// swap read()/write() for API calls later and nothing else has to change.
-
-import { useSyncExternalStore } from "react";
-import type { Library, LibraryEntry, MovieFeatures, WatchStatus } from "./types";
-
-const KEY = "moviemesh:library:v1";
-const EMPTY: Library = {}; // server snapshot: the server never sees localStorage
-
-let cache: Library | null = null; // snapshots must be referentially stable between changes
-const listeners = new Set<() => void>();
-
-function read(): Library {
-  if (cache) return cache;
-  try {
-    const raw = window.localStorage.getItem(KEY);
-    cache = raw ? (JSON.parse(raw) as Library) : {};
-  } catch {
-    cache = {};
-  }
-  return cache;
-}
-
-function write(next: Library) {
-  cache = next;
-  try {
-    window.localStorage.setItem(KEY, JSON.stringify(next));
-  } catch {
-    // storage full or blocked: the change still works for this session
-  }
-  listeners.forEach((l) => l());
-}
-
-function subscribe(cb: () => void) {
-  listeners.add(cb);
-  const onStorage = (e: StorageEvent) => {
-    if (e.key !== KEY) return;
-    cache = null; // another tab changed it
-    cb();
-  };
-  window.addEventListener("storage", onStorage);
-  return () => {
-    listeners.delete(cb);
-    window.removeEventListener("storage", onStorage);
-  };
-}
-
-export function useLibrary(): Library {
-  return useSyncExternalStore(subscribe, read, () => EMPTY);
-}
-
-type Snap = Pick<MovieFeatures, "movieId" | "title" | "year" | "genres" | "tags">;
-
-const entryFor = (m: Snap, status: WatchStatus, rating: number | null, prev?: LibraryEntry): LibraryEntry => ({
-  status,
-  rating,
-  title: m.title,
-  year: m.year,
-  genres: m.genres,
-  tags: m.tags,
-  // `at` = when it entered its current list, so history sorts by when you actually marked it
-  at: prev && prev.status === status ? prev.at : Date.now(),
-});
-
-/** Mark a movie watched / planned, or pass null to remove it from the library. */
-export function setStatus(m: Snap, status: WatchStatus | null) {
-  const lib = { ...read() };
-  const key = String(m.movieId);
-  if (status === null) delete lib[key];
-  else lib[key] = entryFor(m, status, status === "watched" ? (lib[key]?.rating ?? null) : null, lib[key]);
-  write(lib);
-}
-
-/** Rate a movie 1-5 (rating a movie implies you watched it). Rating the same value again clears it. */
-export function setRating(m: Snap, rating: number | null) {
-  const lib = { ...read() };
-  const key = String(m.movieId);
-  const prev = lib[key];
-  const next = prev?.rating === rating ? null : rating;
-  lib[key] = entryFor(m, "watched", next, prev);
-  write(lib);
-}
-</file>
-
 <file path="src/lib/links.ts">
 // Decides whether a movie dropped onto the mesh (e.g. from your list) belongs next to
 // anything that is already there. Pure, so it runs on the client against node data.
@@ -1072,6 +966,98 @@ export function spotAside(others: Pt[]): Pt {
   const maxX = Math.max(...others.map((o) => o.x));
   const ys = others.map((o) => o.y);
   return { x: maxX + 320, y: (Math.min(...ys) + Math.max(...ys)) / 2 };
+}
+</file>
+
+<file path="src/lib/streaks.ts">
+// Streaks: how many of your most recently watched movies in a row share a genre or an actor.
+// Pure and client/server safe. "In a row" means newest-first by when you marked each movie watched.
+
+import type { Library } from "./types";
+
+export type Streak = {
+  kind: "genre" | "actor";
+  /** Genre name or TMDB person id (as a string). */
+  key: string;
+  /** Genre name or actor name, for display. */
+  label: string;
+  length: number;
+};
+
+/** Shortest chain worth showing. Genres are common, so they need a longer run than actors. */
+export const MIN_STREAK = { genre: 3, actor: 2 } as const;
+
+type Cast = { id: number; name: string }[];
+type Item = { genres: string[]; cast?: Cast };
+
+const IGNORED_GENRES = new Set(["(no genres listed)"]);
+
+/**
+ * Streaks that include the first item. `cast` being undefined means "unknown", which breaks an actor
+ * chain instead of silently extending it, so we never claim a streak we can't back up.
+ */
+function runs(items: Item[]): Streak[] {
+  const head = items[0];
+  if (!head) return [];
+  const candidates: (Omit<Streak, "length"> & { has: (i: Item) => boolean })[] = [
+    ...head.genres
+      .filter((g) => !IGNORED_GENRES.has(g))
+      .map((g) => ({ kind: "genre" as const, key: g, label: g, has: (i: Item) => i.genres.includes(g) })),
+    ...(head.cast ?? []).map((c) => ({
+      kind: "actor" as const,
+      key: String(c.id),
+      label: c.name,
+      has: (i: Item) => !!i.cast?.some((x) => x.id === c.id),
+    })),
+  ];
+  const out: Streak[] = [];
+  for (const c of candidates) {
+    let n = 0;
+    while (n < items.length && c.has(items[n])) n++;
+    if (n >= MIN_STREAK[c.kind]) out.push({ kind: c.kind, key: c.key, label: c.label, length: n });
+  }
+  // Longest first; on a tie an actor is the more interesting thing to say.
+  return out.sort((a, b) => b.length - a.length || Number(b.kind === "actor") - Number(a.kind === "actor"));
+}
+
+const watchedNewestFirst = (lib: Library): Item[] =>
+  Object.values(lib)
+    .filter((e) => e.status === "watched")
+    .sort((a, b) => b.at - a.at)
+    .map((e) => ({ genres: e.genres ?? [], cast: e.cast }));
+
+/** Your running streaks right now (they all include your most recently watched movie). */
+export function currentStreaks(lib: Library): Streak[] {
+  return runs(watchedNewestFirst(lib));
+}
+
+/** Streaks you'd have if you watched this movie next. Compare with currentStreaks to see what it extends. */
+export function streaksIfWatched(lib: Library, movie: Item): Streak[] {
+  return runs([movie, ...watchedNewestFirst(lib)]);
+}
+
+export type StreakFit =
+  /** No active streak, and this movie wouldn't start one. */
+  | { kind: "none" }
+  /** You're on a streak and this movie isn't part of it. */
+  | { kind: "breaks"; current: Streak }
+  /** Watching this next would extend a streak you're on (or start one). `prev` = length before it. */
+  | { kind: "extends"; streak: Streak; prev: number; continued: boolean; others: number };
+
+/** How a movie you haven't watched fits with your current streaks. */
+export function streakFit(lib: Library, movie: Item): StreakFit {
+  const current = currentStreaks(lib);
+  const next = streaksIfWatched(lib, movie);
+  if (next.length) {
+    const streak = next[0];
+    const continued = current.some((c) => c.kind === streak.kind && c.key === streak.key);
+    return { kind: "extends", streak, prev: streak.length - 1, continued, others: next.length - 1 };
+  }
+  return current.length ? { kind: "breaks", current: current[0] } : { kind: "none" };
+}
+
+export function streakText(s: Streak): string {
+  return s.kind === "genre" ? `${s.length} ${s.label} movies in a row` : `${s.length} films with ${s.label} in a row`;
 }
 </file>
 
@@ -1219,22 +1205,6 @@ TMDB_API_KEY=
 # CATALOG_DB=
 </file>
 
-<file path="AGENTS.md">
-<!-- BEGIN:nextjs-agent-rules -->
-
-# This is NOT the Next.js you know
-
-This version has breaking changes — APIs, conventions, and file structure may all differ from your training data. Read the relevant guide in `node_modules/next/dist/docs/` (resolved from this file's directory; in monorepos the `next` package may not be visible from the repo root) before writing any code. Heed deprecation notices.
-
-This block is written and re-added by `next dev` — verify at `node_modules/next/dist/server/lib/generate-agent-files.js`. Removing it from a diff only re-creates the uncommitted change; committing it with your work keeps the tree clean.
-
-<!-- END:nextjs-agent-rules -->
-</file>
-
-<file path="CLAUDE.md">
-@AGENTS.md
-</file>
-
 <file path="eslint.config.mjs">
 import { defineConfig, globalIgnores } from "eslint/config";
 import nextVitals from "eslint-config-next/core-web-vitals";
@@ -1274,45 +1244,6 @@ const config = {
 };
 
 export default config;
-</file>
-
-<file path="README.md">
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
-
-## Getting Started
-
-First, run the development server:
-
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
-```
-
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
-
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
-
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
-
-## Learn More
-
-To learn more about Next.js, take a look at the following resources:
-
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
 </file>
 
 <file path="tsconfig.json">
@@ -1737,6 +1668,271 @@ print("\nHour-of-day share (UTC):", np.round(hour / hour.sum(), 3).tolist())
 print("Day-of-week share (Mon..Sun, UTC):", np.round(dow / dow.sum(), 3).tolist())
 </file>
 
+<file path="src/components/LibraryPanel.tsx">
+"use client";
+
+import { useState } from "react";
+import { setRating, setStatus, useLibrary } from "@/lib/library";
+import type { LibraryEntry, WatchStatus } from "@/lib/types";
+
+const tab = (on: boolean) =>
+  `flex-1 rounded-full border px-3 py-1.5 text-sm ${on ? "border-ink bg-ink text-surface" : "border-line hover:border-line-strong"}`;
+const small = "rounded-full border border-line px-2.5 py-1 text-xs hover:border-line-strong";
+
+const snap = (id: string, e: LibraryEntry) => ({
+  movieId: Number(id),
+  title: e.title,
+  year: e.year,
+  genres: e.genres,
+  tags: e.tags,
+  cast: e.cast,
+});
+
+const when = (at: number) =>
+  new Date(at).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+
+/** Your watch history and plan-to-watch list. Only movies you marked yourself appear here. */
+export function LibraryPanel({ onOpen }: { onOpen: (movieId: number) => void }) {
+  const lib = useLibrary();
+  const [which, setWhich] = useState<WatchStatus>("watched");
+  const all = Object.entries(lib);
+  const counts = {
+    watched: all.filter(([, e]) => e.status === "watched").length,
+    planned: all.filter(([, e]) => e.status === "planned").length,
+  };
+  const rows = all.filter(([, e]) => e.status === which).sort((a, b) => b[1].at - a[1].at);
+
+  return (
+    <section aria-label="My list" className="flex flex-col gap-4">
+      <h2 className="font-display text-2xl font-semibold">My list</h2>
+      <div className="flex gap-2" role="group" aria-label="List">
+        <button type="button" aria-pressed={which === "watched"} onClick={() => setWhich("watched")} className={tab(which === "watched")} suppressHydrationWarning>
+          Watched ({counts.watched})
+        </button>
+        <button type="button" aria-pressed={which === "planned"} onClick={() => setWhich("planned")} className={tab(which === "planned")} suppressHydrationWarning>
+          Plan to watch ({counts.planned})
+        </button>
+      </div>
+
+      {rows.length === 0 ? (
+        <p className="text-sm text-muted">
+          {which === "watched"
+            ? "Nothing here yet. Open a movie and press Watched when you've seen it. Clicking nodes in the mesh doesn't count."
+            : "Nothing planned yet. Open a movie and press Plan to watch."}
+        </p>
+      ) : (
+        <ul className="divide-y divide-line">
+          {rows.map(([id, e]) => (
+            <li key={id} className="flex flex-col gap-2 py-3">
+              <div className="flex items-start justify-between gap-3">
+                <button type="button" onClick={() => onOpen(Number(id))} className="min-w-0 text-left">
+                  <span className="block font-medium leading-tight underline-offset-4 hover:underline">{e.title}</span>
+                  <span className="text-xs text-muted">
+                    {e.year ?? ""}
+                    {e.year ? " · " : ""}
+                    {which === "watched" ? "watched" : "added"} {when(e.at)}
+                  </span>
+                </button>
+                {which === "watched" && (
+                  <span className="flex shrink-0 text-base leading-none" role="group" aria-label="Your rating">
+                    {[1, 2, 3, 4, 5].map((n) => (
+                      <button
+                        key={n}
+                        type="button"
+                        aria-label={`Rate ${n} star${n > 1 ? "s" : ""}`}
+                        aria-pressed={e.rating === n}
+                        onClick={() => setRating(snap(id, e), n)}
+                        className={e.rating !== null && n <= e.rating ? "text-ink" : "text-line-strong"}
+                      >
+                        ★
+                      </button>
+                    ))}
+                  </span>
+                )}
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <button type="button" onClick={() => onOpen(Number(id))} className={small}>Open in mesh</button>
+                {which === "planned" && (
+                  <button type="button" onClick={() => setStatus(snap(id, e), "watched")} className={small}>Mark watched</button>
+                )}
+                {which === "watched" && (
+                  <button type="button" onClick={() => setStatus(snap(id, e), "planned")} className={small}>Move to plan</button>
+                )}
+                <button type="button" onClick={() => setStatus(snap(id, e), null)} className={small}>Remove</button>
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+</file>
+
+<file path="src/lib/detail.ts">
+import { getMovie, getStarters } from "./catalog";
+import { featuresOf } from "./score";
+import { getTmdbMovie, tmdbEnabled } from "./tmdb";
+import type { MovieDetail, Starter } from "./types";
+import { computeWhen } from "./when";
+
+/** Everything the UI needs about one movie. Server-only (reads the catalog, may call TMDB). */
+export async function loadMovieDetail(id: number): Promise<MovieDetail | null> {
+  const movie = getMovie(id);
+  if (!movie) return null;
+  const tmdb = movie.tmdbId ? await getTmdbMovie(movie.tmdbId) : null;
+  return {
+    movie,
+    when: computeWhen(movie),
+    tmdb,
+    tmdbStatus: !tmdbEnabled() ? "disabled" : tmdb ? "ok" : "unavailable",
+  };
+}
+
+/** Quick-start movies for the empty state, each carrying what the watch score needs. */
+export function loadStarters(): Starter[] {
+  return getStarters().flatMap((s) => {
+    const full = getMovie(s.id);
+    return full ? [{ id: s.id, ...featuresOf(full, computeWhen(full)) }] : [];
+  });
+}
+</file>
+
+<file path="src/lib/library.ts">
+"use client";
+// Watched / plan-to-watch tracker. Lives in localStorage for now (no accounts needed);
+// swap read()/write() for API calls later and nothing else has to change.
+
+import { useSyncExternalStore } from "react";
+import type { Library, LibraryEntry, MovieFeatures, WatchStatus } from "./types";
+
+const KEY = "moviemesh:library:v1";
+const EMPTY: Library = {}; // server snapshot: the server never sees localStorage
+
+let cache: Library | null = null; // snapshots must be referentially stable between changes
+const listeners = new Set<() => void>();
+
+function read(): Library {
+  if (cache) return cache;
+  try {
+    const raw = window.localStorage.getItem(KEY);
+    cache = raw ? (JSON.parse(raw) as Library) : {};
+  } catch {
+    cache = {};
+  }
+  return cache;
+}
+
+function write(next: Library) {
+  cache = next;
+  try {
+    window.localStorage.setItem(KEY, JSON.stringify(next));
+  } catch {
+    // storage full or blocked: the change still works for this session
+  }
+  listeners.forEach((l) => l());
+}
+
+function subscribe(cb: () => void) {
+  listeners.add(cb);
+  const onStorage = (e: StorageEvent) => {
+    if (e.key !== KEY) return;
+    cache = null; // another tab changed it
+    cb();
+  };
+  window.addEventListener("storage", onStorage);
+  return () => {
+    listeners.delete(cb);
+    window.removeEventListener("storage", onStorage);
+  };
+}
+
+export function useLibrary(): Library {
+  return useSyncExternalStore(subscribe, read, () => EMPTY);
+}
+
+type Snap = Pick<MovieFeatures, "movieId" | "title" | "year" | "genres" | "tags"> & {
+  cast?: { id: number; name: string }[];
+};
+
+const entryFor = (m: Snap, status: WatchStatus, rating: number | null, prev?: LibraryEntry): LibraryEntry => ({
+  status,
+  rating,
+  title: m.title,
+  year: m.year,
+  genres: m.genres,
+  tags: m.tags,
+  cast: m.cast ?? prev?.cast, // keep what we already knew if this caller has no cast
+  // `at` = when it entered its current list, so history sorts by when you actually marked it
+  at: prev && prev.status === status ? prev.at : Date.now(),
+});
+
+/** Mark a movie watched / planned, or pass null to remove it from the library. */
+export function setStatus(m: Snap, status: WatchStatus | null) {
+  const lib = { ...read() };
+  const key = String(m.movieId);
+  if (status === null) delete lib[key];
+  else lib[key] = entryFor(m, status, status === "watched" ? (lib[key]?.rating ?? null) : null, lib[key]);
+  write(lib);
+}
+
+/** Rate a movie 1-5 (rating a movie implies you watched it). Rating the same value again clears it. */
+export function setRating(m: Snap, rating: number | null) {
+  const lib = { ...read() };
+  const key = String(m.movieId);
+  const prev = lib[key];
+  const next = prev?.rating === rating ? null : rating;
+  lib[key] = entryFor(m, "watched", next, prev);
+  write(lib);
+}
+</file>
+
+<file path="src/lib/seasons.ts">
+// Pure helpers, safe to import from both server and client code.
+// (Colour now comes from the watch score in score.ts, not from the month.)
+
+export const MONTHS = [
+  "January", "February", "March", "April", "May", "June",
+  "July", "August", "September", "October", "November", "December",
+];
+export const MONTH_SHORT = MONTHS.map((m) => m.slice(0, 3));
+
+/** Months from now until the next time `peak` comes round (0 = this month). */
+export const monthsUntil = (peak: number, now = new Date()) => (peak - now.getMonth() + 12) % 12;
+</file>
+
+<file path="package.json">
+{
+  "name": "moviemesh",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint"
+  },
+  "dependencies": {
+    "@fontsource-variable/bricolage-grotesque": "^5.3.0",
+    "@fontsource-variable/instrument-sans": "^5.3.0",
+    "@xyflow/react": "^12.12.0",
+    "next": "16.3.8",
+    "react": "19.2.8",
+    "react-dom": "19.2.8"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4",
+    "@types/node": "^24.19.1",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "eslint": "^9",
+    "eslint-config-next": "16.3.8",
+    "tailwindcss": "^4",
+    "typescript": "^5"
+  }
+}
+</file>
+
 <file path="src/components/Explorer.tsx">
 /* eslint-disable @next/next/no-img-element */
 "use client";
@@ -1759,7 +1955,7 @@ type Selection =
   | null;
 
 const rootFrom = (d: MovieDetail): MeshMovieData => ({
-  ...featuresOf(d.movie, d.when),
+  ...featuresOf(d.movie, d.when, d.tmdb?.cast),
   kind: "movie",
   tmdbId: d.movie.tmdbId,
   posterPath: d.tmdb?.posterPath ?? null,
@@ -2020,504 +2216,13 @@ export function GradeLegend() {
               ))}
             </ul>
             <p className="mt-2 text-xs text-muted">
-              Rim = watch score right now, from season, your taste, and ratings. Watched movies are scored too, for rewatching. ✓ watched, + planned.
+              Rim = watch score out of 100, from rating, streaks, season, and your taste. Watched movies are scored too, for rewatching. ✓ watched, + planned.
             </p>
           </>
         )}
       </div>
     </div>
   );
-}
-</file>
-
-<file path="src/lib/detail.ts">
-import { getMovie, getStarters } from "./catalog";
-import { featuresOf } from "./score";
-import { getTmdbMovie, tmdbEnabled } from "./tmdb";
-import type { MovieDetail, Starter } from "./types";
-import { computeWhen } from "./when";
-
-/** Everything the UI needs about one movie. Server-only (reads the catalog, may call TMDB). */
-export async function loadMovieDetail(id: number): Promise<MovieDetail | null> {
-  const movie = getMovie(id);
-  if (!movie) return null;
-  const tmdb = movie.tmdbId ? await getTmdbMovie(movie.tmdbId) : null;
-  return {
-    movie,
-    when: computeWhen(movie),
-    tmdb,
-    tmdbStatus: !tmdbEnabled() ? "disabled" : tmdb ? "ok" : "unavailable",
-  };
-}
-
-/** Quick-start movies for the empty state, each carrying what the watch score needs. */
-export function loadStarters(): Starter[] {
-  return getStarters().flatMap((s) => {
-    const full = getMovie(s.id);
-    return full ? [{ id: s.id, ...featuresOf(full, computeWhen(full)) }] : [];
-  });
-}
-</file>
-
-<file path="src/lib/mesh.ts">
-import { getMovie, getMoviesByTmdbIds, getSimilar } from "./catalog";
-import { getPersonMovieIds, getTmdbMovie, tmdbEnabled } from "./tmdb";
-import { featuresOf } from "./score";
-import { computeWhen } from "./when";
-import type { ExpandResponse, MeshMovieData, MovieSummary } from "./types";
-
-type MovieNode = { id: string } & MeshMovieData;
-
-async function movieNode(s: MovieSummary, via: string | null): Promise<MovieNode> {
-  const full = getMovie(s.id);
-  const when = full ? computeWhen(full) : { peakMonth: null, strength: "none" as const, source: "none" as const };
-  // Everything the watch score needs rides along on the node, so the client can re-score
-  // instantly when the library changes (no refetch).
-  const features = featuresOf(
-    full ?? { id: s.id, title: s.title, year: s.year, genres: s.genres, tags: [], avgRating: null, nRatings: null },
-    when,
-  );
-  const tmdb = s.tmdbId ? await getTmdbMovie(s.tmdbId) : null;
-  return {
-    ...features,
-    id: `m:${s.id}`,
-    kind: "movie",
-    tmdbId: s.tmdbId,
-    posterPath: tmdb?.posterPath ?? null,
-    via,
-  };
-}
-
-/** Clicking a movie: similar movies (from the catalog) + top cast (from TMDB, if configured). */
-export async function expandMovie(id: number): Promise<ExpandResponse | null> {
-  const movie = getMovie(id);
-  if (!movie) return null;
-  const similar = getSimilar(id, 6);
-  const [simNodes, tmdb] = await Promise.all([
-    Promise.all(similar.map((s) => movieNode(s.movie, s.via))),
-    movie.tmdbId ? getTmdbMovie(movie.tmdbId) : Promise.resolve(null),
-  ]);
-
-  const source = `m:${id}`;
-  const nodes: ExpandResponse["nodes"] = [...simNodes];
-  const edges: ExpandResponse["edges"] = similar.map((s) => ({
-    source,
-    target: `m:${s.movie.id}`,
-    via: s.via,
-  }));
-  for (const c of tmdb?.cast.slice(0, 5) ?? []) {
-    nodes.push({
-      id: `p:${c.id}`,
-      kind: "person",
-      personId: c.id,
-      name: c.name,
-      character: c.character,
-      profilePath: c.profilePath,
-      via: `Cast of ${movie.title}`,
-    });
-    edges.push({ source, target: `p:${c.id}`, via: "cast" });
-  }
-  return { nodes, edges, tmdb: !tmdbEnabled() ? "disabled" : tmdb ? "ok" : "unavailable" };
-}
-
-/** Clicking an actor: their films that exist in the catalog (joined on tmdb_id). */
-export async function expandPerson(personId: number, name: string): Promise<ExpandResponse> {
-  if (!tmdbEnabled()) return { nodes: [], edges: [], tmdb: "disabled" };
-  const tmdbIds = await getPersonMovieIds(personId);
-  if (!tmdbIds) return { nodes: [], edges: [], tmdb: "unavailable" };
-  const found = getMoviesByTmdbIds(tmdbIds.slice(0, 80)).slice(0, 6);
-  const nodes = await Promise.all(found.map((f) => movieNode(f, `${name} acted in this`)));
-  return {
-    nodes,
-    edges: found.map((f) => ({ source: `p:${personId}`, target: `m:${f.id}`, via: "acted in" })),
-    tmdb: "ok",
-  };
-}
-</file>
-
-<file path="src/lib/score.ts">
-// The watch score: one number (0-100) per movie, blended from several signals.
-// Pure and client/server safe. Each signal returns a Factor that carries its own
-// human-readable reason, so "why is this recommended" can never disagree with the score.
-
-import { MONTHS, monthsUntil } from "./seasons";
-import type { Library, LibraryEntry, Movie, MovieFeatures, When } from "./types";
-
-// ---------- tiers (the rim colour) ----------
-export type TierId = "now" | "good" | "maybe" | "low" | "unknown";
-export type Tier = { id: TierId; label: string; color: string; dashed?: boolean };
-
-export const TIERS: Record<TierId, Tier> = {
-  now: { id: "now", label: "Watch now", color: "#2FA66A" },
-  good: { id: "good", label: "Good fit", color: "#8CBF3F" },
-  maybe: { id: "maybe", label: "Maybe later", color: "#E3A008" },
-  low: { id: "low", label: "Not now", color: "#8089A3" },
-  unknown: { id: "unknown", label: "No signal yet", color: "#8089A3", dashed: true },
-};
-
-export const TIER_CUTOFFS = { now: 75, good: 60, maybe: 45 };
-
-export function tierFor(score: number): Tier {
-  if (score >= TIER_CUTOFFS.now) return TIERS.now;
-  if (score >= TIER_CUTOFFS.good) return TIERS.good;
-  if (score >= TIER_CUTOFFS.maybe) return TIERS.maybe;
-  return TIERS.low;
-}
-
-// ---------- factors ----------
-export type FactorKey = "season" | "taste" | "quality" | "history";
-export type Factor = {
-  key: FactorKey;
-  label: string;
-  /** 0-1: how good this signal looks for this movie. */
-  value: number;
-  /** How much this signal counts in the blend. */
-  weight: number;
-  reason: string;
-  tone: "good" | "neutral" | "bad";
-};
-
-// Tune these. Only signals that apply to a movie are blended (weights are re-normalised),
-// so a movie with no seasonal pattern is graded on taste and quality alone.
-// Plan-to-watch is deliberately NOT a signal: planning a movie says nothing about whether it's a good pick.
-export const WEIGHTS: Record<FactorKey, number> = { season: 0.3, taste: 0.4, quality: 0.2, history: 0.3 };
-
-const clamp = (n: number, lo = 0, hi = 1) => Math.min(hi, Math.max(lo, n));
-const toneOf = (v: number): Factor["tone"] => (v >= 0.6 ? "good" : v < 0.35 ? "bad" : "neutral");
-
-// ---------- features ----------
-export function featuresOf(
-  m: Pick<Movie, "id" | "title" | "year" | "genres" | "tags" | "avgRating" | "nRatings">,
-  when: Pick<When, "peakMonth" | "strength" | "source">,
-): MovieFeatures {
-  return {
-    movieId: m.id,
-    title: m.title,
-    year: m.year,
-    genres: m.genres,
-    tags: m.tags.slice(0, 15).map((t) => t.tag),
-    avgRating: m.avgRating,
-    nRatings: m.nRatings,
-    peakMonth: when.peakMonth,
-    weak: when.strength === "mild",
-    seasonSource: when.source,
-  };
-}
-
-// ---------- season ----------
-function seasonFactor(f: MovieFeatures, now: Date): Factor | null {
-  if (f.peakMonth === null) return null; // "any time works": not a signal either way
-  const peak = MONTHS[f.peakMonth];
-  const d = monthsUntil(f.peakMonth, now);
-  const raw = d === 0 ? 1 : d === 1 ? 0.7 : d === 2 ? 0.4 : d === 11 ? 0.45 : d === 10 ? 0.25 : 0.1;
-  const value = f.weak ? 0.5 + (raw - 0.5) * 0.5 : raw; // genre-level guesses count for less
-  const when =
-    d === 0 ? `In season now (best in ${peak})`
-    : d === 1 ? `In season next month (${peak})`
-    : d === 2 ? `Season starts in 2 months (${peak})`
-    : `Best in ${peak}, which is ${d} months away`;
-  return {
-    key: "season",
-    label: "Season",
-    value,
-    weight: WEIGHTS.season,
-    reason: f.weak ? `${when}. Weak, genre-level pattern` : when,
-    tone: toneOf(value),
-  };
-}
-
-// ---------- quality ----------
-const PRIOR_MEAN = 3.4; // rough MovieLens-wide average
-const PRIOR_WEIGHT = 150; // pretend every movie starts with this many average votes
-
-function qualityFactor(f: MovieFeatures): Factor | null {
-  if (f.avgRating == null || f.nRatings == null) return null; // catalog built without --ratings
-  const shrunk = (f.nRatings * f.avgRating + PRIOR_WEIGHT * PRIOR_MEAN) / (f.nRatings + PRIOR_WEIGHT);
-  const value = clamp((shrunk - 2.5) / 2); // 2.5 stars -> 0, 4.5 stars -> 1
-  const n = f.nRatings.toLocaleString("en-US");
-  const reason =
-    value >= 0.65 ? `Highly rated: ${f.avgRating.toFixed(1)}/5 from ${n} MovieLens users`
-    : value < 0.35 ? `Rated low: ${f.avgRating.toFixed(1)}/5 from ${n} MovieLens users`
-    : `Decent ratings: ${f.avgRating.toFixed(1)}/5 from ${n} MovieLens users`;
-  return { key: "quality", label: "Quality", value, weight: WEIGHTS.quality, reason, tone: toneOf(value) };
-}
-
-// ---------- taste (compares against movies you've watched and rated; plan-to-watch is ignored) ----------
-type Sig = { genres: string[]; tags: string[] };
-const signature = (m: Sig) => new Set([...m.tags.map((t) => `t:${t}`), ...m.genres.map((g) => `g:${g}`)]);
-
-function compare(a: Set<string>, b: Set<string>) {
-  const shared: string[] = [];
-  for (const x of a) if (b.has(x)) shared.push(x);
-  const sim = a.size + b.size ? (2 * shared.length) / (a.size + b.size) : 0; // Dice coefficient
-  shared.sort((x, y) => (x[0] === "t" ? 0 : 1) - (y[0] === "t" ? 0 : 1)); // tags are more specific than genres
-  return { sim, shared: shared.map((x) => x.slice(2)) };
-}
-
-/** How much a library entry says about your taste: -1 (hated it) to +1 (loved it). */
-function affinity(e: LibraryEntry) {
-  if (e.rating != null) return (e.rating - 3) / 2;
-  return 0.2; // watched but unrated: a mild positive
-}
-
-const verb = (e: LibraryEntry) => (e.rating != null ? `rated ${e.rating}★` : "watched");
-
-type Hit = { strength: number; entry: LibraryEntry; shared: string[] };
-
-function tasteFactor(f: MovieFeatures, lib: Library): Factor | null {
-  const mine = signature(f);
-  let pos: Hit | null = null;
-  let neg: Hit | null = null;
-  let near = 0;
-  let signal = 0;
-  for (const [id, entry] of Object.entries(lib)) {
-    if (Number(id) === f.movieId || entry.status !== "watched") continue;
-    const a = affinity(entry);
-    if (a === 0) continue; // a 3-star rating says nothing either way
-    signal++;
-    const { sim, shared } = compare(mine, signature({ genres: entry.genres ?? [], tags: entry.tags ?? [] }));
-    const strength = Math.min(1, sim * 2.5) * (0.4 + 0.6 * Math.abs(a));
-    if (a > 0) {
-      if (sim >= 0.15) near++;
-      if (!pos || strength > pos.strength) pos = { strength, entry, shared };
-    } else if (!neg || strength > neg.strength) {
-      neg = { strength, entry, shared };
-    }
-  }
-  if (!signal) return null; // empty library: nothing to match against
-
-  const extra = Math.max(0, near - 1);
-  const posValue = pos ? Math.min(1, pos.strength + Math.min(0.16, extra * 0.08)) : 0;
-  const negValue = neg?.strength ?? 0;
-  const value = clamp(posValue - 0.7 * negValue);
-
-  let reason = "Different from what you've watched so far";
-  if (neg && negValue >= 0.2 && negValue > posValue * 0.7) {
-    reason = `Similar to ${neg.entry.title}, which you ${verb(neg.entry)}`;
-  } else if (pos && pos.strength >= 0.2) {
-    reason = `Shares ${pos.shared.slice(0, 3).join(", ")} with ${pos.entry.title}, which you ${verb(pos.entry)}`;
-    if (extra > 0) reason += ` (+${extra} more like it)`;
-  }
-  return { key: "taste", label: "Taste", value, weight: WEIGHTS.taste, reason, tone: toneOf(value) };
-}
-
-// ---------- history (your own rating of this movie, for rewatches) ----------
-function historyFactor(entry: LibraryEntry | null): Factor | null {
-  if (entry?.status !== "watched" || entry.rating == null) return null;
-  const value = (entry.rating - 1) / 4; // 1 star -> 0, 5 stars -> 1
-  const r = entry.rating;
-  const reason =
-    r >= 4 ? `You rated it ${r}★, so it's worth a rewatch`
-    : r === 3 ? `You rated it ${r}★`
-    : `You rated it ${r}★, so probably not a rewatch`;
-  return { key: "history", label: "You", value, weight: WEIGHTS.history, reason, tone: toneOf(value) };
-}
-
-// ---------- the blend ----------
-export type Scored = {
-  state: "scored" | "unknown";
-  /** null only when there is no signal at all. Watched movies are scored too: you can always rewatch. */
-  score: number | null;
-  tier: Tier;
-  /** Most influential first. */
-  factors: Factor[];
-  status: LibraryEntry["status"] | null;
-  rating: number | null;
-};
-
-export function scoreMovie(f: MovieFeatures, lib: Library, now: Date): Scored {
-  const entry = lib[String(f.movieId)] ?? null;
-  const base = { status: entry?.status ?? null, rating: entry?.rating ?? null };
-
-  const factors = [seasonFactor(f, now), tasteFactor(f, lib), qualityFactor(f), historyFactor(entry)].filter(
-    (x): x is Factor => !!x,
-  );
-  if (!factors.length) return { ...base, state: "unknown", score: null, tier: TIERS.unknown, factors: [] };
-
-  const totalWeight = factors.reduce((s, x) => s + x.weight, 0);
-  const score = Math.round((100 * factors.reduce((s, x) => s + x.weight * x.value, 0)) / totalWeight);
-  // Order by how far each signal pulls the score away from "meh" (0.5), in either direction.
-  factors.sort((a, b) => b.weight * Math.abs(b.value - 0.5) - a.weight * Math.abs(a.value - 0.5));
-  return { ...base, state: "scored", score, tier: tierFor(score), factors };
-}
-</file>
-
-<file path="src/lib/seasons.ts">
-// Pure helpers, safe to import from both server and client code.
-// (Colour now comes from the watch score in score.ts, not from the month.)
-
-export const MONTHS = [
-  "January", "February", "March", "April", "May", "June",
-  "July", "August", "September", "October", "November", "December",
-];
-export const MONTH_SHORT = MONTHS.map((m) => m.slice(0, 3));
-
-/** Months from now until the next time `peak` comes round (0 = this month). */
-export const monthsUntil = (peak: number, now = new Date()) => (peak - now.getMonth() + 12) % 12;
-</file>
-
-<file path="src/lib/types.ts">
-// Month indices are 0-11 (Jan = 0) everywhere in the app.
-
-export type Seasonal = { peakMonth: number; lift: number; peakYears: number };
-
-export type Movie = {
-  id: number;
-  title: string;
-  altTitle: string | null;
-  year: number | null;
-  genres: string[];
-  tags: { tag: string; n: number }[];
-  imdbId: string | null;
-  tmdbId: number | null;
-  nRatings: number | null;
-  avgRating: number | null;
-  seasonal: Seasonal | null;
-};
-
-export type MovieSummary = {
-  id: number;
-  title: string;
-  year: number | null;
-  genres: string[];
-  tmdbId: number | null;
-};
-
-/** Where a movie sits in the year, and why we think so. */
-export type When = {
-  peakMonth: number | null;
-  source: "learned" | "tags" | "genre" | "none";
-  strength: "strong" | "mild" | "none";
-  reason: string;
-};
-
-export type CastMember = {
-  id: number;
-  name: string;
-  character: string | null;
-  profilePath: string | null;
-};
-
-export type TmdbMovie = {
-  posterPath: string | null;
-  overview: string | null;
-  tagline: string | null;
-  runtime: number | null;
-  cast: CastMember[];
-};
-
-export type TmdbStatus = "ok" | "disabled" | "unavailable";
-
-export type MovieDetail = {
-  movie: Movie;
-  when: When;
-  tmdb: TmdbMovie | null;
-  tmdbStatus: TmdbStatus;
-};
-
-export type SearchHit = {
-  id: number;
-  title: string;
-  year: number | null;
-  genres: string[];
-};
-
-// ---- mesh ----
-export type MeshMovieData = {
-  kind: "movie";
-  movieId: number;
-  title: string;
-  year: number | null;
-  tmdbId: number | null;
-  posterPath: string | null;
-  // ---- inputs to the watch score (see lib/score.ts) ----
-  genres: string[];
-  /** Most agreed-upon tags first. */
-  tags: string[];
-  avgRating: number | null;
-  nRatings: number | null;
-  peakMonth: number | null;
-  /** True when the peak month is only a weak, genre-level guess. */
-  weak?: boolean;
-  seasonSource: When["source"];
-  via: string | null;
-  loading?: boolean;
-};
-
-/** Everything the watch score needs to know about a movie. */
-export type MovieFeatures = Pick<
-  MeshMovieData,
-  "movieId" | "title" | "year" | "genres" | "tags" | "avgRating" | "nRatings" | "peakMonth" | "weak" | "seasonSource"
->;
-
-export type Starter = MovieFeatures & { id: number };
-
-// ---- personal library (watched / plan to watch) ----
-export type WatchStatus = "watched" | "planned";
-
-export type LibraryEntry = {
-  status: WatchStatus;
-  /** 1-5 stars, only meaningful once watched. */
-  rating: number | null;
-  // Snapshot of the movie so taste matching works without re-fetching anything.
-  title: string;
-  year: number | null;
-  genres: string[];
-  tags: string[];
-  at: number;
-};
-
-/** Keyed by MovieLens movie id (as a string). */
-export type Library = Record<string, LibraryEntry>;
-
-export type MeshPersonData = {
-  kind: "person";
-  personId: number;
-  name: string;
-  character: string | null;
-  profilePath: string | null;
-  via: string | null;
-  loading?: boolean;
-};
-
-export type MeshNodeData = MeshMovieData | MeshPersonData;
-
-export type ExpandResponse = {
-  nodes: ({ id: string } & MeshNodeData)[];
-  edges: { source: string; target: string; via: string }[];
-  tmdb: TmdbStatus;
-};
-</file>
-
-<file path="package.json">
-{
-  "name": "moviemesh",
-  "version": "0.1.0",
-  "private": true,
-  "scripts": {
-    "dev": "next dev",
-    "build": "next build",
-    "start": "next start",
-    "lint": "eslint"
-  },
-  "dependencies": {
-    "@fontsource-variable/bricolage-grotesque": "^5.3.0",
-    "@fontsource-variable/instrument-sans": "^5.3.0",
-    "@xyflow/react": "^12.12.0",
-    "next": "16.3.8",
-    "react": "19.2.8",
-    "react-dom": "19.2.8"
-  },
-  "devDependencies": {
-    "@tailwindcss/postcss": "^4",
-    "@types/node": "^24.19.1",
-    "@types/react": "^19",
-    "@types/react-dom": "^19",
-    "eslint": "^9",
-    "eslint-config-next": "16.3.8",
-    "tailwindcss": "^4",
-    "typescript": "^5"
-  }
 }
 </file>
 
@@ -2728,199 +2433,6 @@ function Mesh({ root, focus, onSelect, onTmdb, onError }: Props) {
 }
 </file>
 
-<file path="src/components/MoviePanel.tsx">
-/* eslint-disable @next/next/no-img-element */
-"use client";
-
-import { useMemo } from "react";
-import { imageUrl } from "@/lib/images";
-import { setRating, setStatus, useLibrary } from "@/lib/library";
-import { featuresOf, scoreMovie, tierFor } from "@/lib/score";
-import type { MovieDetail, WatchStatus } from "@/lib/types";
-
-const chip = "rounded-full border border-line px-2.5 py-0.5 text-xs text-ink";
-const toggle = (on: boolean) =>
-  `rounded-full border px-3 py-1.5 text-sm ${on ? "border-ink bg-ink text-surface" : "border-line hover:border-line-strong"}`;
-
-function runtime(min: number | null) {
-  if (!min) return null;
-  const h = Math.floor(min / 60);
-  return h ? `${h}h ${min % 60}m` : `${min}m`;
-}
-
-/** Everything we know about one movie, plus the watched/planned tracker and the watch score. */
-export function MoviePanel({
-  detail,
-  now,
-  via,
-  showTmdbNote = true,
-}: {
-  detail: MovieDetail;
-  now: Date;
-  via?: string | null;
-  /** The explorer already shows one TMDB notice over the canvas, so it turns this one off. */
-  showTmdbNote?: boolean;
-}) {
-  const { movie, when, tmdb, tmdbStatus } = detail;
-  const lib = useLibrary();
-  const features = useMemo(() => featuresOf(movie, when), [movie, when]);
-  const scored = useMemo(() => scoreMovie(features, lib, now), [features, lib, now]);
-  const color = scored.tier.color;
-  const entry = lib[String(movie.id)];
-  const toggleStatus = (st: WatchStatus) => setStatus(features, entry?.status === st ? null : st);
-  const poster = imageUrl(tmdb?.posterPath ?? null, "w342");
-  const meta = [movie.year, runtime(tmdb?.runtime ?? null), movie.avgRating ? `${movie.avgRating.toFixed(1)} avg rating` : null]
-    .filter(Boolean);
-
-  return (
-    <article className="flex flex-col gap-6">
-      <header className="flex gap-4">
-        {poster ? (
-          <img src={poster} alt={`Poster for ${movie.title}`} className="h-36 w-24 shrink-0 rounded-md object-cover" />
-        ) : (
-          <div
-            aria-hidden
-            className="grid h-36 w-24 shrink-0 place-items-center rounded-md font-display text-3xl"
-            style={{ background: `color-mix(in srgb, ${color} 25%, var(--surface))` }}
-          >
-            {movie.title.slice(0, 1)}
-          </div>
-        )}
-        <div className="min-w-0">
-          <h2 className="font-display text-2xl font-semibold leading-tight">{movie.title}</h2>
-          {movie.altTitle && <p className="mt-0.5 text-sm text-muted">{movie.altTitle}</p>}
-          <p className="mt-2 flex flex-wrap gap-x-3 text-sm text-muted">
-            {meta.map((m) => (
-              <span key={String(m)}>{m}</span>
-            ))}
-          </p>
-          {tmdb?.tagline && <p className="mt-2 text-sm italic text-muted">{tmdb.tagline}</p>}
-          {via && <p className="mt-2 text-sm text-muted">Linked by: {via}</p>}
-        </div>
-      </header>
-
-      <section aria-label="Your list" className="-mt-2">
-        <div className="flex flex-wrap items-center gap-2">
-          <button type="button" aria-pressed={entry?.status === "watched"} onClick={() => toggleStatus("watched")} className={toggle(entry?.status === "watched")}>
-            {entry?.status === "watched" ? "✓ Watched" : "Mark as watched"}
-          </button>
-          <button type="button" aria-pressed={entry?.status === "planned"} onClick={() => toggleStatus("planned")} className={toggle(entry?.status === "planned")}>
-            {entry?.status === "planned" ? "✓ On plan-to-watch list" : "+ Plan to watch"}
-          </button>
-        </div>
-        {entry?.status === "watched" && (
-          <div className="mt-3 flex items-center gap-1" role="group" aria-label="Your rating">
-            <span className="mr-1 text-sm text-muted">Your rating (update it any time, even after a rewatch)</span>
-            {[1, 2, 3, 4, 5].map((n) => (
-              <button
-                key={n}
-                type="button"
-                aria-label={`${n} star${n > 1 ? "s" : ""}`}
-                aria-pressed={entry.rating === n}
-                onClick={() => setRating(features, n)}
-                className={`text-xl leading-none ${entry.rating !== null && n <= entry.rating ? "text-ink" : "text-line-strong"}`}
-              >
-                ★
-              </button>
-            ))}
-          </div>
-        )}
-      </section>
-
-      <section aria-labelledby="score-h">
-        <h3 id="score-h" className="font-display text-base font-semibold">Watch score</h3>
-        <p className="mt-2 flex items-center gap-2 font-display text-xl">
-          <span aria-hidden className="h-3 w-3 rounded-full" style={{ background: color }} />
-          {scored.tier.label}
-          {scored.score !== null && <span className="text-sm text-muted">{scored.score}/100</span>}
-        </p>
-        {scored.status === "watched" && (
-          <p className="mt-2 text-sm text-muted">
-            You&apos;ve watched this. The score shows how good a pick it is for a rewatch.
-          </p>
-        )}
-        {scored.state === "unknown" && (
-          <p className="mt-2 text-sm text-muted">
-            Nothing to go on yet. Mark movies you&apos;ve watched and rate them, and this will start grading.
-          </p>
-        )}
-        {scored.factors.length > 0 && (
-          <>
-            <h4 className="mt-4 text-sm font-medium">Why</h4>
-            <ul className="mt-2 space-y-2.5">
-              {scored.factors.map((f) => (
-                <li key={f.key} className="flex items-start gap-3 text-sm">
-                  <span className="mt-1 flex w-14 shrink-0 flex-col gap-1">
-                    <span className="text-[11px] font-medium uppercase tracking-wide text-muted">{f.label}</span>
-                    <span aria-hidden className="h-1.5 overflow-hidden rounded bg-line">
-                      <span className="block h-full" style={{ width: `${Math.round(f.value * 100)}%`, background: tierFor(f.value * 100).color }} />
-                    </span>
-                  </span>
-                  <span className="min-w-0 flex-1">{f.reason}</span>
-                </li>
-              ))}
-            </ul>
-            <p className="mt-3 text-xs text-muted">
-              A weighted blend of the signals above. Rating more movies sharpens the taste match.
-            </p>
-          </>
-        )}
-      </section>
-
-      {tmdb?.overview && <p className="max-w-prose text-sm leading-relaxed">{tmdb.overview}</p>}
-      {showTmdbNote && tmdbStatus === "disabled" && (
-        <p className="text-sm text-muted">Posters, summaries and cast need a TMDB key. See the README.</p>
-      )}
-      {showTmdbNote && tmdbStatus === "unavailable" && (
-        <p className="text-sm text-muted">TMDB didn&apos;t respond for this movie, so posters and cast are hidden for now.</p>
-      )}
-
-      {movie.genres.length > 0 && (
-        <section aria-labelledby="genres-h">
-          <h3 id="genres-h" className="font-display text-base font-semibold">Genres</h3>
-          <ul className="mt-2 flex flex-wrap gap-1.5">
-            {movie.genres.map((g) => (
-              <li key={g} className={chip}>{g}</li>
-            ))}
-          </ul>
-        </section>
-      )}
-
-      {movie.tags.length > 0 && (
-        <section aria-labelledby="tags-h">
-          <h3 id="tags-h" className="font-display text-base font-semibold">What people tag it</h3>
-          <ul className="mt-2 flex flex-wrap gap-1.5">
-            {movie.tags.slice(0, 12).map((t) => (
-              <li key={t.tag} className={chip}>{t.tag}</li>
-            ))}
-          </ul>
-        </section>
-      )}
-
-      {tmdb && tmdb.cast.length > 0 && (
-        <section aria-labelledby="cast-h">
-          <h3 id="cast-h" className="font-display text-base font-semibold">Cast</h3>
-          <ul className="mt-2 space-y-1 text-sm">
-            {tmdb.cast.slice(0, 8).map((c) => (
-              <li key={c.id}>
-                {c.name}
-                {c.character && <span className="text-muted"> as {c.character}</span>}
-              </li>
-            ))}
-          </ul>
-        </section>
-      )}
-
-      {tmdb && (
-        <p className="text-xs text-muted">
-          This product uses the TMDB API but is not endorsed or certified by TMDB.
-        </p>
-      )}
-    </article>
-  );
-}
-</file>
-
 <file path="src/components/nodes.tsx">
 "use client";
 /* eslint-disable @next/next/no-img-element */
@@ -3023,6 +2535,566 @@ export function PersonNode({ data, selected }: NodeProps<Node<MeshPersonData, "p
     </div>
   );
 }
+</file>
+
+<file path="src/lib/mesh.ts">
+import { getMovie, getMoviesByTmdbIds, getSimilar } from "./catalog";
+import { getPersonMovieIds, getTmdbMovie, tmdbEnabled } from "./tmdb";
+import { featuresOf } from "./score";
+import { computeWhen } from "./when";
+import type { ExpandResponse, MeshMovieData, MovieSummary } from "./types";
+
+type MovieNode = { id: string } & MeshMovieData;
+
+async function movieNode(s: MovieSummary, via: string | null): Promise<MovieNode> {
+  const full = getMovie(s.id);
+  const when = full ? computeWhen(full) : { peakMonth: null, strength: "none" as const, source: "none" as const };
+  // Everything the watch score needs rides along on the node, so the client can re-score
+  // instantly when the library changes (no refetch).
+  const tmdb = s.tmdbId ? await getTmdbMovie(s.tmdbId) : null;
+  const features = featuresOf(
+    full ?? { id: s.id, title: s.title, year: s.year, genres: s.genres, tags: [], avgRating: null, nRatings: null },
+    when,
+    tmdb?.cast, // actor streaks need to know who's in each movie
+  );
+  return {
+    ...features,
+    id: `m:${s.id}`,
+    kind: "movie",
+    tmdbId: s.tmdbId,
+    posterPath: tmdb?.posterPath ?? null,
+    via,
+  };
+}
+
+/** Clicking a movie: similar movies (from the catalog) + top cast (from TMDB, if configured). */
+export async function expandMovie(id: number): Promise<ExpandResponse | null> {
+  const movie = getMovie(id);
+  if (!movie) return null;
+  const similar = getSimilar(id, 6);
+  const [simNodes, tmdb] = await Promise.all([
+    Promise.all(similar.map((s) => movieNode(s.movie, s.via))),
+    movie.tmdbId ? getTmdbMovie(movie.tmdbId) : Promise.resolve(null),
+  ]);
+
+  const source = `m:${id}`;
+  const nodes: ExpandResponse["nodes"] = [...simNodes];
+  const edges: ExpandResponse["edges"] = similar.map((s) => ({
+    source,
+    target: `m:${s.movie.id}`,
+    via: s.via,
+  }));
+  for (const c of tmdb?.cast.slice(0, 5) ?? []) {
+    nodes.push({
+      id: `p:${c.id}`,
+      kind: "person",
+      personId: c.id,
+      name: c.name,
+      character: c.character,
+      profilePath: c.profilePath,
+      via: `Cast of ${movie.title}`,
+    });
+    edges.push({ source, target: `p:${c.id}`, via: "cast" });
+  }
+  return { nodes, edges, tmdb: !tmdbEnabled() ? "disabled" : tmdb ? "ok" : "unavailable" };
+}
+
+/** Clicking an actor: their films that exist in the catalog (joined on tmdb_id). */
+export async function expandPerson(personId: number, name: string): Promise<ExpandResponse> {
+  if (!tmdbEnabled()) return { nodes: [], edges: [], tmdb: "disabled" };
+  const tmdbIds = await getPersonMovieIds(personId);
+  if (!tmdbIds) return { nodes: [], edges: [], tmdb: "unavailable" };
+  const found = getMoviesByTmdbIds(tmdbIds.slice(0, 80)).slice(0, 6);
+  const nodes = await Promise.all(found.map((f) => movieNode(f, `${name} acted in this`)));
+  return {
+    nodes,
+    edges: found.map((f) => ({ source: `p:${personId}`, target: `m:${f.id}`, via: "acted in" })),
+    tmdb: "ok",
+  };
+}
+</file>
+
+<file path="src/lib/score.ts">
+// The watch score: one number (0-100) per movie. Each indicator earns a share of the 100 points,
+// and the shares below say how much each one counts. Pure and client/server safe.
+//
+// Every indicator returns a Factor that carries its own number and its own reason, so the
+// breakdown on screen can never disagree with the score: the points always add up to it.
+
+import { streakFit, streakText } from "./streaks";
+import { MONTHS, monthsUntil } from "./seasons";
+import type { Library, LibraryEntry, Movie, MovieFeatures, When } from "./types";
+
+// ---------- tiers (the rim colour) ----------
+export type TierId = "now" | "good" | "maybe" | "low" | "unknown";
+export type Tier = { id: TierId; label: string; color: string; dashed?: boolean };
+
+export const TIERS: Record<TierId, Tier> = {
+  now: { id: "now", label: "Watch now", color: "#2FA66A" },
+  good: { id: "good", label: "Good fit", color: "#8CBF3F" },
+  maybe: { id: "maybe", label: "Maybe later", color: "#E3A008" },
+  low: { id: "low", label: "Not now", color: "#8089A3" },
+  unknown: { id: "unknown", label: "No signal yet", color: "#8089A3", dashed: true },
+};
+
+export const TIER_CUTOFFS = { now: 75, good: 60, maybe: 45 };
+
+export function tierFor(score: number): Tier {
+  if (score >= TIER_CUTOFFS.now) return TIERS.now;
+  if (score >= TIER_CUTOFFS.good) return TIERS.good;
+  if (score >= TIER_CUTOFFS.maybe) return TIERS.maybe;
+  return TIERS.low;
+}
+
+// ---------- the red-to-green scale used everywhere a 0-1 value is drawn ----------
+export const SCALE = { low: "#D0594A", mid: "#E3A008", high: "#2FA66A" };
+export const SCALE_GRADIENT = `linear-gradient(90deg, ${SCALE.low}, ${SCALE.mid} 50%, ${SCALE.high})`;
+
+const hex = (c: string) => [1, 3, 5].map((i) => parseInt(c.slice(i, i + 2), 16));
+export function valueColor(v: number): string {
+  const t = Math.min(1, Math.max(0, v));
+  const [from, to, u] = t < 0.5 ? [SCALE.low, SCALE.mid, t * 2] : [SCALE.mid, SCALE.high, (t - 0.5) * 2];
+  const a = hex(from);
+  const b = hex(to);
+  return `rgb(${a.map((x, i) => Math.round(x + (b[i] - x) * u)).join(",")})`;
+}
+
+// ---------- indicators ----------
+export type FactorKey = "quality" | "streak" | "season" | "vibe" | "genre" | "era" | "history";
+
+/**
+ * TUNE HERE. How many of the 100 points each indicator can earn.
+ * Indicators that don't apply to a movie (no seasonal pattern, no active streak, ...) are left out
+ * and the rest are scaled up to fill the 100, so a movie is never punished for missing data.
+ * `history` (your own rating) only applies to movies you've already watched, so it's the rewatch signal.
+ */
+export const WEIGHTS: Record<FactorKey, number> = {
+  quality: 30, // very high: is it actually good?
+  streak: 22, // mildly high: does it continue what you're on a roll with?
+  season: 18, // mid: is it the right time of year?
+  vibe: 12, // does it feel like specific movies you loved?
+  genre: 10, // mild: genres you tend to enjoy
+  era: 8, // mild: decades you tend to enjoy
+  history: 25, // your own verdict, for rewatches
+};
+
+/** Fixed display order (also the order of the spider graph's axes). */
+export const FACTOR_ORDER: FactorKey[] = ["quality", "streak", "season", "vibe", "genre", "era", "history"];
+const LABELS: Record<FactorKey, string> = {
+  quality: "Rating",
+  streak: "Streak",
+  season: "Season",
+  vibe: "Vibe",
+  genre: "Genre",
+  era: "Era",
+  history: "You",
+};
+
+export type Factor = {
+  key: FactorKey;
+  label: string;
+  /** 0-1 how good this signal looks, or null when it doesn't apply to this movie. */
+  value: number | null;
+  /** Points this indicator contributes to the score. All points add up to the score exactly. */
+  points: number;
+  /** The most it could contribute for this movie (its share of the 100). 0 when it doesn't apply. */
+  max: number;
+  reason: string;
+};
+type RawFactor = Pick<Factor, "key" | "value" | "reason">;
+
+const clamp = (n: number, lo = 0, hi = 1) => Math.min(hi, Math.max(lo, n));
+const na = (key: FactorKey, reason: string): RawFactor => ({ key, value: null, reason });
+
+// ---------- features ----------
+export function featuresOf(
+  m: Pick<Movie, "id" | "title" | "year" | "genres" | "tags" | "avgRating" | "nRatings">,
+  when: Pick<When, "peakMonth" | "strength" | "source">,
+  cast?: { id: number; name: string }[],
+): MovieFeatures {
+  return {
+    movieId: m.id,
+    title: m.title,
+    year: m.year,
+    genres: m.genres,
+    tags: m.tags.slice(0, 15).map((t) => t.tag),
+    cast: cast?.slice(0, 5).map((c) => ({ id: c.id, name: c.name })),
+    avgRating: m.avgRating,
+    nRatings: m.nRatings,
+    peakMonth: when.peakMonth,
+    weak: when.strength === "mild",
+    seasonSource: when.source,
+  };
+}
+
+// ---------- rating (very high) ----------
+const PRIOR_MEAN = 3.4; // rough MovieLens-wide average
+const PRIOR_WEIGHT = 150; // pretend every movie starts with this many average votes
+
+function qualityFactor(f: MovieFeatures): RawFactor {
+  if (f.avgRating == null || f.nRatings == null) return na("quality", "No rating data for this movie");
+  const shrunk = (f.nRatings * f.avgRating + PRIOR_WEIGHT * PRIOR_MEAN) / (f.nRatings + PRIOR_WEIGHT);
+  const value = clamp((shrunk - 2.5) / 2); // 2.5 stars -> 0, 4.5 stars -> 1
+  const n = f.nRatings.toLocaleString("en-US");
+  const reason =
+    value >= 0.65 ? `Highly rated: ${f.avgRating.toFixed(1)}/5 from ${n} MovieLens users`
+    : value < 0.35 ? `Rated low: ${f.avgRating.toFixed(1)}/5 from ${n} MovieLens users`
+    : `Decent ratings: ${f.avgRating.toFixed(1)}/5 from ${n} MovieLens users`;
+  return { key: "quality", value, reason };
+}
+
+// ---------- streak (mildly high) ----------
+// If you're on a roll (3 comedies in a row, 2 films with the same actor in a row), movies that keep
+// it going score high and movies that break it score lower. No active streak: it doesn't apply.
+const STREAK = { base: 0.55, perStep: 0.09, breaks: 0.4 }; // value = base + perStep * (length so far), max 1
+
+function streakFactor(f: MovieFeatures, lib: Library, entry: LibraryEntry | null): RawFactor {
+  if (entry?.status === "watched") return na("streak", "You've already watched this");
+  const fit = streakFit(lib, { genres: f.genres, cast: f.cast });
+  if (fit.kind === "none") return na("streak", "No active streak. Watch 3 of a genre or 2 with the same actor in a row to start one");
+  if (fit.kind === "breaks") {
+    return { key: "streak", value: STREAK.breaks, reason: `Breaks your streak of ${streakText(fit.current)}` };
+  }
+  const value = clamp(STREAK.base + STREAK.perStep * fit.prev);
+  const more = fit.others > 0 ? ` (+${fit.others} more streak${fit.others > 1 ? "s" : ""})` : "";
+  const reason = fit.continued
+    ? `Keeps your streak going: ${streakText(fit.streak)}${more}`
+    : `Would start a streak: ${streakText(fit.streak)}${more}`;
+  return { key: "streak", value, reason };
+}
+
+// ---------- season (mid) ----------
+function seasonFactor(f: MovieFeatures, now: Date): RawFactor {
+  if (f.peakMonth === null) return na("season", "No seasonal pattern, works any time of year");
+  const peak = MONTHS[f.peakMonth];
+  const d = monthsUntil(f.peakMonth, now);
+  const raw = d === 0 ? 1 : d === 1 ? 0.7 : d === 2 ? 0.4 : d === 11 ? 0.45 : d === 10 ? 0.25 : 0.1;
+  const value = f.weak ? 0.5 + (raw - 0.5) * 0.5 : raw; // genre-level guesses count for less
+  const when =
+    d === 0 ? `In season now (best in ${peak})`
+    : d === 1 ? `In season next month (${peak})`
+    : d === 2 ? `Season starts in 2 months (${peak})`
+    : `Best in ${peak}, which is ${d} months away`;
+  return { key: "season", value, reason: f.weak ? `${when}. Weak, genre-level pattern` : when };
+}
+
+// ---------- what you've watched (shared by vibe, genre, era) ----------
+type Watched = { id: number; entry: LibraryEntry; a: number };
+
+/** How much a library entry says about your taste: -1 (hated it) to +1 (loved it). */
+const affinity = (e: LibraryEntry) => (e.rating != null ? (e.rating - 3) / 2 : 0.2); // unrated: mild positive
+
+const watchedExcept = (lib: Library, movieId: number): Watched[] =>
+  Object.entries(lib)
+    .filter(([id, e]) => e.status === "watched" && Number(id) !== movieId)
+    .map(([id, entry]) => ({ id: Number(id), entry, a: affinity(entry) }));
+
+type Fit = { value: number; key: string; n: number; avg: number | null };
+
+/**
+ * How you've felt about movies sharing each of `keys` (a genre, a decade). Each key's average affinity is
+ * shrunk toward neutral when you've only seen a few, then averaged. null = you've seen none of these.
+ */
+function fitFor(keys: string[], watched: Watched[], keysOf: (e: LibraryEntry) => string[], k: number): Fit | null {
+  let total = 0;
+  let used = 0;
+  let best: (Fit & { s: number }) | null = null;
+  for (const key of keys) {
+    const hits = watched.filter((w) => keysOf(w.entry).includes(key));
+    if (!hits.length) continue;
+    const s = (hits.reduce((x, w) => x + w.a, 0) / hits.length) * (hits.length / (hits.length + k));
+    total += s;
+    used++;
+    const rated = hits.filter((w) => w.entry.rating != null);
+    const avg = rated.length ? rated.reduce((x, w) => x + w.entry.rating!, 0) / rated.length : null;
+    if (!best || Math.abs(s) > Math.abs(best.s)) best = { s, key, n: hits.length, avg, value: 0 };
+  }
+  if (!used || !best) return null;
+  return { value: clamp(0.5 + 0.5 * (total / used)), key: best.key, n: best.n, avg: best.avg };
+}
+
+const fitReason = (fit: Fit, seen: string) => {
+  const avg = fit.avg != null ? `, rated ${fit.avg.toFixed(1)}★ on average` : "";
+  return fit.value >= 0.6 ? `You've liked ${seen}${avg}` : fit.value < 0.4 ? `You haven't loved ${seen}${avg}` : `You've watched ${seen}${avg}`;
+};
+
+// ---------- genre (mild) ----------
+function genreFactor(f: MovieFeatures, watched: Watched[]): RawFactor {
+  if (!watched.length) return na("genre", "Mark and rate movies you've watched to learn your genres");
+  const fit = fitFor(f.genres, watched, (e) => e.genres ?? [], 2);
+  if (!fit) return na("genre", "You haven't watched this genre yet");
+  return { key: "genre", value: fit.value, reason: fitReason(fit, `${fit.n} ${fit.key} movie${fit.n > 1 ? "s" : ""}`) };
+}
+
+// ---------- era (mild) ----------
+const decadeOf = (y: number | null) => (y == null ? null : `${Math.floor(y / 10) * 10}s`);
+
+function eraFactor(f: MovieFeatures, watched: Watched[]): RawFactor {
+  const decade = decadeOf(f.year);
+  if (!decade) return na("era", "No release year for this movie");
+  if (!watched.length) return na("era", "Mark and rate movies you've watched to learn your eras");
+  const fit = fitFor([decade], watched, (e) => (decadeOf(e.year) ? [decadeOf(e.year)!] : []), 3);
+  if (!fit) return na("era", `You haven't watched anything from the ${decade} yet`);
+  return { key: "era", value: fit.value, reason: fitReason(fit, `${fit.n} movie${fit.n > 1 ? "s" : ""} from the ${fit.key}`) };
+}
+
+// ---------- vibe (compares tags with specific movies you've watched and rated) ----------
+const tagSet = (tags: string[]) => new Set(tags);
+
+function compare(a: Set<string>, b: Set<string>) {
+  const shared: string[] = [];
+  for (const x of a) if (b.has(x)) shared.push(x);
+  const sim = a.size + b.size ? (2 * shared.length) / (a.size + b.size) : 0; // Dice coefficient
+  return { sim, shared };
+}
+
+type Hit = { strength: number; entry: LibraryEntry; shared: string[] };
+const verb = (e: LibraryEntry) => (e.rating != null ? `rated ${e.rating}★` : "watched");
+
+function vibeFactor(f: MovieFeatures, watched: Watched[]): RawFactor {
+  if (!f.tags.length) return na("vibe", "No tags for this movie to compare");
+  const mine = tagSet(f.tags);
+  let pos: Hit | null = null;
+  let neg: Hit | null = null;
+  let near = 0;
+  let signal = 0;
+  for (const { entry, a } of watched) {
+    if (a === 0) continue; // a 3-star rating says nothing either way
+    signal++;
+    const { sim, shared } = compare(mine, tagSet(entry.tags ?? []));
+    const strength = Math.min(1, sim * 2.5) * (0.4 + 0.6 * Math.abs(a));
+    if (a > 0) {
+      if (sim >= 0.15) near++;
+      if (!pos || strength > pos.strength) pos = { strength, entry, shared };
+    } else if (!neg || strength > neg.strength) {
+      neg = { strength, entry, shared };
+    }
+  }
+  if (!signal) return na("vibe", "Rate movies you've watched to match vibes");
+
+  const extra = Math.max(0, near - 1);
+  const posValue = pos ? Math.min(1, pos.strength + Math.min(0.16, extra * 0.08)) : 0;
+  const negValue = neg?.strength ?? 0;
+  // Nothing in common with anything you've watched is a shrug, not a strike: it bottoms out at 0.3.
+  const value = clamp(0.3 + 0.7 * posValue - 0.7 * negValue);
+
+  let reason = "Different from what you've watched so far";
+  if (neg && negValue >= 0.2 && negValue > posValue * 0.7) {
+    reason = `Similar to ${neg.entry.title}, which you ${verb(neg.entry)}`;
+  } else if (pos && pos.strength >= 0.2) {
+    reason = `Shares ${pos.shared.slice(0, 3).join(", ")} with ${pos.entry.title}, which you ${verb(pos.entry)}`;
+    if (extra > 0) reason += ` (+${extra} more like it)`;
+  }
+  return { key: "vibe", value, reason };
+}
+
+// ---------- you (your own rating of this movie, for rewatches) ----------
+function historyFactor(entry: LibraryEntry | null): RawFactor {
+  if (entry?.status !== "watched") return na("history", "Not watched yet");
+  if (entry.rating == null) return na("history", "You haven't rated it yet");
+  const value = (entry.rating - 1) / 4; // 1 star -> 0, 5 stars -> 1
+  const r = entry.rating;
+  const reason =
+    r >= 4 ? `You rated it ${r}★, so it's worth a rewatch`
+    : r === 3 ? `You rated it ${r}★`
+    : `You rated it ${r}★, so probably not a rewatch`;
+  return { key: "history", value, reason };
+}
+
+// ---------- the blend ----------
+export type Scored = {
+  state: "scored" | "unknown";
+  /** null only when no indicator applies at all. Watched movies are scored too: you can always rewatch. */
+  score: number | null;
+  tier: Tier;
+  /** Every indicator in FACTOR_ORDER. Ones that don't apply have value null and 0 points. */
+  factors: Factor[];
+  status: LibraryEntry["status"] | null;
+  rating: number | null;
+};
+
+/** Round each contribution to a whole number so the whole numbers still add up to `target` (largest remainder). */
+function splitPoints(exact: number[], target: number): number[] {
+  const out = exact.map(Math.floor);
+  let left = target - out.reduce((s, n) => s + n, 0);
+  const order = exact.map((x, i) => [x - Math.floor(x), i] as const).sort((a, b) => b[0] - a[0]);
+  for (const [, i] of order) {
+    if (left <= 0) break;
+    out[i]++;
+    left--;
+  }
+  return out;
+}
+
+export function scoreMovie(f: MovieFeatures, lib: Library, now: Date): Scored {
+  const entry = lib[String(f.movieId)] ?? null;
+  const base = { status: entry?.status ?? null, rating: entry?.rating ?? null };
+  const watched = watchedExcept(lib, f.movieId);
+
+  const byKey: Record<FactorKey, RawFactor> = {
+    quality: qualityFactor(f),
+    streak: streakFactor(f, lib, entry),
+    season: seasonFactor(f, now),
+    vibe: vibeFactor(f, watched),
+    genre: genreFactor(f, watched),
+    era: eraFactor(f, watched),
+    history: historyFactor(entry),
+  };
+  const raw = FACTOR_ORDER.map((k) => byKey[k]);
+  const applies = raw.filter((x) => x.value !== null);
+  if (!applies.length) {
+    const factors = raw.map((x): Factor => ({ ...x, label: LABELS[x.key], points: 0, max: 0 }));
+    return { ...base, state: "unknown", score: null, tier: TIERS.unknown, factors };
+  }
+
+  // The 100 points are split by weight across the indicators that apply; each earns value * its share.
+  const totalWeight = applies.reduce((s, x) => s + WEIGHTS[x.key], 0);
+  const maxOf = (x: RawFactor) => (x.value === null ? 0 : (100 * WEIGHTS[x.key]) / totalWeight);
+  const exact = raw.map((x) => (x.value === null ? 0 : maxOf(x) * x.value));
+  const score = Math.round(exact.reduce((s, n) => s + n, 0));
+  const points = splitPoints(exact, score);
+  const factors = raw.map(
+    (x, i): Factor => ({ ...x, label: LABELS[x.key], points: points[i], max: Math.max(Math.round(maxOf(x)), points[i]) }),
+  );
+  return { ...base, state: "scored", score, tier: tierFor(score), factors };
+}
+</file>
+
+<file path="src/lib/types.ts">
+// Month indices are 0-11 (Jan = 0) everywhere in the app.
+
+export type Seasonal = { peakMonth: number; lift: number; peakYears: number };
+
+export type Movie = {
+  id: number;
+  title: string;
+  altTitle: string | null;
+  year: number | null;
+  genres: string[];
+  tags: { tag: string; n: number }[];
+  imdbId: string | null;
+  tmdbId: number | null;
+  nRatings: number | null;
+  avgRating: number | null;
+  seasonal: Seasonal | null;
+};
+
+export type MovieSummary = {
+  id: number;
+  title: string;
+  year: number | null;
+  genres: string[];
+  tmdbId: number | null;
+};
+
+/** Where a movie sits in the year, and why we think so. */
+export type When = {
+  peakMonth: number | null;
+  source: "learned" | "tags" | "genre" | "none";
+  strength: "strong" | "mild" | "none";
+  reason: string;
+};
+
+export type CastMember = {
+  id: number;
+  name: string;
+  character: string | null;
+  profilePath: string | null;
+};
+
+export type TmdbMovie = {
+  posterPath: string | null;
+  overview: string | null;
+  tagline: string | null;
+  runtime: number | null;
+  cast: CastMember[];
+};
+
+export type TmdbStatus = "ok" | "disabled" | "unavailable";
+
+export type MovieDetail = {
+  movie: Movie;
+  when: When;
+  tmdb: TmdbMovie | null;
+  tmdbStatus: TmdbStatus;
+};
+
+export type SearchHit = {
+  id: number;
+  title: string;
+  year: number | null;
+  genres: string[];
+};
+
+// ---- mesh ----
+export type MeshMovieData = {
+  kind: "movie";
+  movieId: number;
+  title: string;
+  year: number | null;
+  tmdbId: number | null;
+  posterPath: string | null;
+  // ---- inputs to the watch score (see lib/score.ts) ----
+  genres: string[];
+  /** Most agreed-upon tags first. */
+  tags: string[];
+  /** Top-billed cast when TMDB is available (used for actor streaks). */
+  cast?: { id: number; name: string }[];
+  avgRating: number | null;
+  nRatings: number | null;
+  peakMonth: number | null;
+  /** True when the peak month is only a weak, genre-level guess. */
+  weak?: boolean;
+  seasonSource: When["source"];
+  via: string | null;
+  loading?: boolean;
+};
+
+/** Everything the watch score needs to know about a movie. */
+export type MovieFeatures = Pick<
+  MeshMovieData,
+  "movieId" | "title" | "year" | "genres" | "tags" | "cast" | "avgRating" | "nRatings" | "peakMonth" | "weak" | "seasonSource"
+>;
+
+export type Starter = MovieFeatures & { id: number };
+
+// ---- personal library (watched / plan to watch) ----
+export type WatchStatus = "watched" | "planned";
+
+export type LibraryEntry = {
+  status: WatchStatus;
+  /** 1-5 stars, only meaningful once watched. */
+  rating: number | null;
+  // Snapshot of the movie so taste matching works without re-fetching anything.
+  title: string;
+  year: number | null;
+  genres: string[];
+  tags: string[];
+  /** Top-billed cast, saved when TMDB was available. Missing = unknown (used for actor streaks). */
+  cast?: { id: number; name: string }[];
+  at: number;
+};
+
+/** Keyed by MovieLens movie id (as a string). */
+export type Library = Record<string, LibraryEntry>;
+
+export type MeshPersonData = {
+  kind: "person";
+  personId: number;
+  name: string;
+  character: string | null;
+  profilePath: string | null;
+  via: string | null;
+  loading?: boolean;
+};
+
+export type MeshNodeData = MeshMovieData | MeshPersonData;
+
+export type ExpandResponse = {
+  nodes: ({ id: string } & MeshNodeData)[];
+  edges: { source: string; target: string; via: string }[];
+  tmdb: TmdbStatus;
+};
 </file>
 
 <file path=".gitignore">
@@ -3241,6 +3313,238 @@ pyrightconfig.json
 /data/catalog.db
 /data/ml-32m
 data\seasonal_movies.csv
+</file>
+
+<file path="src/components/MoviePanel.tsx">
+/* eslint-disable @next/next/no-img-element */
+"use client";
+
+import { useMemo } from "react";
+import { imageUrl } from "@/lib/images";
+import { setRating, setStatus, useLibrary } from "@/lib/library";
+import { featuresOf, scoreMovie, SCALE_GRADIENT } from "@/lib/score";
+import type { MovieDetail, WatchStatus } from "@/lib/types";
+import { ScoreRadar } from "./ScoreRadar";
+
+const chip = "rounded-full border border-line px-2.5 py-0.5 text-xs text-ink";
+const toggle = (on: boolean) =>
+  `rounded-full border px-3 py-1.5 text-sm ${on ? "border-ink bg-ink text-surface" : "border-line hover:border-line-strong"}`;
+
+/** Bar that fills left to right; the gradient is pinned to the full track so the fill's end colour matches its value. */
+function Fill({ value, tall }: { value: number; tall?: boolean }) {
+  const v = Math.min(1, Math.max(0, value));
+  return (
+    <span aria-hidden className={`mt-1.5 block overflow-hidden rounded-full bg-line ${tall ? "h-3" : "h-2"}`}>
+      <span
+        className="block h-full rounded-full"
+        style={{ width: `${v * 100}%`, backgroundImage: SCALE_GRADIENT, backgroundSize: `${100 / Math.max(v, 0.05)}% 100%` }}
+      />
+    </span>
+  );
+}
+
+function runtime(min: number | null) {
+  if (!min) return null;
+  const h = Math.floor(min / 60);
+  return h ? `${h}h ${min % 60}m` : `${min}m`;
+}
+
+/** Everything we know about one movie, plus the watched/planned tracker and the watch score. */
+export function MoviePanel({
+  detail,
+  now,
+  via,
+  showTmdbNote = true,
+}: {
+  detail: MovieDetail;
+  now: Date;
+  via?: string | null;
+  /** The explorer already shows one TMDB notice over the canvas, so it turns this one off. */
+  showTmdbNote?: boolean;
+}) {
+  const { movie, when, tmdb, tmdbStatus } = detail;
+  const lib = useLibrary();
+  const features = useMemo(() => featuresOf(movie, when, tmdb?.cast), [movie, when, tmdb]);
+  const scored = useMemo(() => scoreMovie(features, lib, now), [features, lib, now]);
+  const color = scored.tier.color;
+  // Biggest contributors first; indicators that don't apply sink to the bottom.
+  const ranked = useMemo(
+    () => [...scored.factors].sort((a, b) => (b.value === null ? -1 : b.points) - (a.value === null ? -1 : a.points)),
+    [scored.factors],
+  );
+  // The spider graph keeps its spokes fixed, except "You", which only exists for movies you've watched.
+  const radarFactors = scored.factors.filter((f) => f.key !== "history" || f.value !== null);
+  const entry = lib[String(movie.id)];
+  const toggleStatus = (st: WatchStatus) => setStatus(features, entry?.status === st ? null : st);
+  const poster = imageUrl(tmdb?.posterPath ?? null, "w342");
+  const meta = [movie.year, runtime(tmdb?.runtime ?? null), movie.avgRating ? `${movie.avgRating.toFixed(1)} avg rating` : null]
+    .filter(Boolean);
+
+  return (
+    <article className="flex flex-col gap-6">
+      <header className="flex gap-4">
+        {poster ? (
+          <img src={poster} alt={`Poster for ${movie.title}`} className="h-36 w-24 shrink-0 rounded-md object-cover" />
+        ) : (
+          <div
+            aria-hidden
+            className="grid h-36 w-24 shrink-0 place-items-center rounded-md font-display text-3xl"
+            style={{ background: `color-mix(in srgb, ${color} 25%, var(--surface))` }}
+          >
+            {movie.title.slice(0, 1)}
+          </div>
+        )}
+        <div className="min-w-0">
+          <h2 className="font-display text-2xl font-semibold leading-tight">{movie.title}</h2>
+          {movie.altTitle && <p className="mt-0.5 text-sm text-muted">{movie.altTitle}</p>}
+          <p className="mt-2 flex flex-wrap gap-x-3 text-sm text-muted">
+            {meta.map((m) => (
+              <span key={String(m)}>{m}</span>
+            ))}
+          </p>
+          {tmdb?.tagline && <p className="mt-2 text-sm italic text-muted">{tmdb.tagline}</p>}
+          {via && <p className="mt-2 text-sm text-muted">Linked by: {via}</p>}
+        </div>
+      </header>
+
+      <section aria-label="Your list" className="-mt-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <button type="button" aria-pressed={entry?.status === "watched"} onClick={() => toggleStatus("watched")} className={toggle(entry?.status === "watched")}>
+            {entry?.status === "watched" ? "✓ Watched" : "Mark as watched"}
+          </button>
+          <button type="button" aria-pressed={entry?.status === "planned"} onClick={() => toggleStatus("planned")} className={toggle(entry?.status === "planned")}>
+            {entry?.status === "planned" ? "✓ On plan-to-watch list" : "+ Plan to watch"}
+          </button>
+        </div>
+        {entry?.status === "watched" && (
+          <div className="mt-3 flex items-center gap-1" role="group" aria-label="Your rating">
+            <span className="mr-1 text-sm text-muted">Your rating (update it any time, even after a rewatch)</span>
+            {[1, 2, 3, 4, 5].map((n) => (
+              <button
+                key={n}
+                type="button"
+                aria-label={`${n} star${n > 1 ? "s" : ""}`}
+                aria-pressed={entry.rating === n}
+                onClick={() => setRating(features, n)}
+                className={`text-xl leading-none ${entry.rating !== null && n <= entry.rating ? "text-ink" : "text-line-strong"}`}
+              >
+                ★
+              </button>
+            ))}
+          </div>
+        )}
+      </section>
+
+      <section aria-labelledby="score-h">
+        <h3 id="score-h" className="font-display text-base font-semibold">Watch score</h3>
+        <div className="mt-2 flex items-baseline justify-between gap-3">
+          <p className="flex items-center gap-2 font-display text-xl">
+            <span aria-hidden className="h-3 w-3 rounded-full" style={{ background: color }} />
+            {scored.tier.label}
+          </p>
+          {scored.score !== null && (
+            <p className="font-display text-2xl font-semibold tabular-nums">
+              {scored.score}
+              <span className="text-sm font-normal text-muted"> / 100</span>
+            </p>
+          )}
+        </div>
+        {scored.score !== null && <Fill value={scored.score / 100} tall />}
+        {scored.status === "watched" && (
+          <p className="mt-2 text-sm text-muted">
+            You&apos;ve watched this. The score shows how good a pick it is for a rewatch.
+          </p>
+        )}
+        {scored.state === "unknown" && (
+          <p className="mt-2 text-sm text-muted">
+            Nothing to go on yet. Mark movies you&apos;ve watched and rate them, and this will start grading.
+          </p>
+        )}
+        {scored.state === "scored" && (
+          <>
+            <div className="mt-4">
+              <ScoreRadar factors={radarFactors} color={color} />
+            </div>
+            <h4 className="mt-2 text-sm font-medium">Where the points come from</h4>
+            <ul className="mt-2 space-y-3">
+              {ranked.map((f) => (
+                <li key={f.key} className={f.value === null ? "opacity-60" : ""}>
+                  <div className="flex items-baseline justify-between gap-3">
+                    <span className="text-[11px] font-medium uppercase tracking-wide text-muted">{f.label}</span>
+                    {f.value === null ? (
+                      <span className="text-xs text-muted">doesn&apos;t apply</span>
+                    ) : (
+                      <span className="font-display text-sm font-semibold tabular-nums">
+                        {f.points}
+                        <span className="font-normal text-muted"> / {f.max}</span>
+                      </span>
+                    )}
+                  </div>
+                  {f.value !== null && <Fill value={f.value} />}
+                  <p className="mt-1 text-sm">{f.reason}</p>
+                </li>
+              ))}
+            </ul>
+            <p className="mt-3 text-xs text-muted">
+              The points add up to the score. Each bar fills from red to green by how good that signal looks, and the
+              number is how many points it adds out of what it could. Rating counts most, then streaks and season.
+            </p>
+          </>
+        )}
+      </section>
+
+      {tmdb?.overview && <p className="max-w-prose text-sm leading-relaxed">{tmdb.overview}</p>}
+      {showTmdbNote && tmdbStatus === "disabled" && (
+        <p className="text-sm text-muted">Posters, summaries and cast need a TMDB key. See the README.</p>
+      )}
+      {showTmdbNote && tmdbStatus === "unavailable" && (
+        <p className="text-sm text-muted">TMDB didn&apos;t respond for this movie, so posters and cast are hidden for now.</p>
+      )}
+
+      {movie.genres.length > 0 && (
+        <section aria-labelledby="genres-h">
+          <h3 id="genres-h" className="font-display text-base font-semibold">Genres</h3>
+          <ul className="mt-2 flex flex-wrap gap-1.5">
+            {movie.genres.map((g) => (
+              <li key={g} className={chip}>{g}</li>
+            ))}
+          </ul>
+        </section>
+      )}
+
+      {movie.tags.length > 0 && (
+        <section aria-labelledby="tags-h">
+          <h3 id="tags-h" className="font-display text-base font-semibold">What people tag it</h3>
+          <ul className="mt-2 flex flex-wrap gap-1.5">
+            {movie.tags.slice(0, 12).map((t) => (
+              <li key={t.tag} className={chip}>{t.tag}</li>
+            ))}
+          </ul>
+        </section>
+      )}
+
+      {tmdb && tmdb.cast.length > 0 && (
+        <section aria-labelledby="cast-h">
+          <h3 id="cast-h" className="font-display text-base font-semibold">Cast</h3>
+          <ul className="mt-2 space-y-1 text-sm">
+            {tmdb.cast.slice(0, 8).map((c) => (
+              <li key={c.id}>
+                {c.name}
+                {c.character && <span className="text-muted"> as {c.character}</span>}
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+
+      {tmdb && (
+        <p className="text-xs text-muted">
+          This product uses the TMDB API but is not endorsed or certified by TMDB.
+        </p>
+      )}
+    </article>
+  );
+}
 </file>
 
 </files>

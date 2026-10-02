@@ -47,13 +47,16 @@ export type TmdbMovie = {
   cast: CastMember[];
 };
 
-export type TmdbStatus = "ok" | "disabled" | "unavailable";
+/** ok = loaded, disabled = no API key, off = the person switched TMDB off, unavailable = TMDB didn't answer. */
+export type TmdbStatus = "ok" | "disabled" | "off" | "unavailable";
 
 export type MovieDetail = {
   movie: Movie;
   when: When;
   tmdb: TmdbMovie | null;
   tmdbStatus: TmdbStatus;
+  /** The whole catalog has no rating data, i.e. it was built without `--ratings`. */
+  ratingsMissing: boolean;
 };
 
 export type SearchHit = {
@@ -115,17 +118,8 @@ export type LibraryEntry = {
 /** Keyed by MovieLens movie id (as a string). */
 export type Library = Record<string, LibraryEntry>;
 
-export type MeshPersonData = {
-  kind: "person";
-  personId: number;
-  name: string;
-  character: string | null;
-  profilePath: string | null;
-  via: string | null;
-  loading?: boolean;
-};
-
-export type MeshNodeData = MeshMovieData | MeshPersonData;
+/** What a node in the mesh carries. (Movies only; actors live in the details panel, not as nodes.) */
+export type MeshNodeData = MeshMovieData;
 
 export type ExpandResponse = {
   nodes: ({ id: string } & MeshNodeData)[];
