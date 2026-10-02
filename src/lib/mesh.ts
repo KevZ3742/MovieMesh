@@ -11,11 +11,12 @@ async function movieNode(s: MovieSummary, via: string | null): Promise<MovieNode
   const when = full ? computeWhen(full) : { peakMonth: null, strength: "none" as const, source: "none" as const };
   // Everything the watch score needs rides along on the node, so the client can re-score
   // instantly when the library changes (no refetch).
+  const tmdb = s.tmdbId ? await getTmdbMovie(s.tmdbId) : null;
   const features = featuresOf(
     full ?? { id: s.id, title: s.title, year: s.year, genres: s.genres, tags: [], avgRating: null, nRatings: null },
     when,
+    tmdb?.cast, // actor streaks need to know who's in each movie
   );
-  const tmdb = s.tmdbId ? await getTmdbMovie(s.tmdbId) : null;
   return {
     ...features,
     id: `m:${s.id}`,

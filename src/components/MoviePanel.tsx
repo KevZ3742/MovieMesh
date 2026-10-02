@@ -4,12 +4,26 @@
 import { useMemo } from "react";
 import { imageUrl } from "@/lib/images";
 import { setRating, setStatus, useLibrary } from "@/lib/library";
-import { featuresOf, scoreMovie, tierFor } from "@/lib/score";
+import { featuresOf, scoreMovie, SCALE_GRADIENT } from "@/lib/score";
 import type { MovieDetail, WatchStatus } from "@/lib/types";
+import { ScoreRadar } from "./ScoreRadar";
 
 const chip = "rounded-full border border-line px-2.5 py-0.5 text-xs text-ink";
 const toggle = (on: boolean) =>
   `rounded-full border px-3 py-1.5 text-sm ${on ? "border-ink bg-ink text-surface" : "border-line hover:border-line-strong"}`;
+
+/** Bar that fills left to right; the gradient is pinned to the full track so the fill's end colour matches its value. */
+function Fill({ value, tall }: { value: number; tall?: boolean }) {
+  const v = Math.min(1, Math.max(0, value));
+  return (
+    <span aria-hidden className={`mt-1.5 block overflow-hidden rounded-full bg-line ${tall ? "h-3" : "h-2"}`}>
+      <span
+        className="block h-full rounded-full"
+        style={{ width: `${v * 100}%`, backgroundImage: SCALE_GRADIENT, backgroundSize: `${100 / Math.max(v, 0.05)}% 100%` }}
+      />
+    </span>
+  );
+}
 
 function runtime(min: number | null) {
   if (!min) return null;
@@ -32,9 +46,16 @@ export function MoviePanel({
 }) {
   const { movie, when, tmdb, tmdbStatus } = detail;
   const lib = useLibrary();
-  const features = useMemo(() => featuresOf(movie, when), [movie, when]);
+  const features = useMemo(() => featuresOf(movie, when, tmdb?.cast), [movie, when, tmdb]);
   const scored = useMemo(() => scoreMovie(features, lib, now), [features, lib, now]);
   const color = scored.tier.color;
+  // Biggest contributors first; indicators that don't apply sink to the bottom.
+  const ranked = useMemo(
+    () => [...scored.factors].sort((a, b) => (b.value === null ? -1 : b.points) - (a.value === null ? -1 : a.points)),
+    [scored.factors],
+  );
+  // The spider graph keeps its spokes fixed, except "You", which only exists for movies you've watched.
+  const radarFactors = scored.factors.filter((f) => f.key !== "history" || f.value !== null);
   const entry = lib[String(movie.id)];
   const toggleStatus = (st: WatchStatus) => setStatus(features, entry?.status === st ? null : st);
   const poster = imageUrl(tmdb?.posterPath ?? null, "w342");
@@ -98,11 +119,19 @@ export function MoviePanel({
 
       <section aria-labelledby="score-h">
         <h3 id="score-h" className="font-display text-base font-semibold">Watch score</h3>
-        <p className="mt-2 flex items-center gap-2 font-display text-xl">
-          <span aria-hidden className="h-3 w-3 rounded-full" style={{ background: color }} />
-          {scored.tier.label}
-          {scored.score !== null && <span className="text-sm text-muted">{scored.score}/100</span>}
-        </p>
+        <div className="mt-2 flex items-baseline justify-between gap-3">
+          <p className="flex items-center gap-2 font-display text-xl">
+            <span aria-hidden className="h-3 w-3 rounded-full" style={{ background: color }} />
+            {scored.tier.label}
+          </p>
+          {scored.score !== null && (
+            <p className="font-display text-2xl font-semibold tabular-nums">
+              {scored.score}
+              <span className="text-sm font-normal text-muted"> / 100</span>
+            </p>
+          )}
+        </div>
+        {scored.score !== null && <Fill value={scored.score / 100} tall />}
         {scored.status === "watched" && (
           <p className="mt-2 text-sm text-muted">
             You&apos;ve watched this. The score shows how good a pick it is for a rewatch.
@@ -113,24 +142,34 @@ export function MoviePanel({
             Nothing to go on yet. Mark movies you&apos;ve watched and rate them, and this will start grading.
           </p>
         )}
-        {scored.factors.length > 0 && (
+        {scored.state === "scored" && (
           <>
-            <h4 className="mt-4 text-sm font-medium">Why</h4>
-            <ul className="mt-2 space-y-2.5">
-              {scored.factors.map((f) => (
-                <li key={f.key} className="flex items-start gap-3 text-sm">
-                  <span className="mt-1 flex w-14 shrink-0 flex-col gap-1">
+            <div className="mt-4">
+              <ScoreRadar factors={radarFactors} color={color} />
+            </div>
+            <h4 className="mt-2 text-sm font-medium">Where the points come from</h4>
+            <ul className="mt-2 space-y-3">
+              {ranked.map((f) => (
+                <li key={f.key} className={f.value === null ? "opacity-60" : ""}>
+                  <div className="flex items-baseline justify-between gap-3">
                     <span className="text-[11px] font-medium uppercase tracking-wide text-muted">{f.label}</span>
-                    <span aria-hidden className="h-1.5 overflow-hidden rounded bg-line">
-                      <span className="block h-full" style={{ width: `${Math.round(f.value * 100)}%`, background: tierFor(f.value * 100).color }} />
-                    </span>
-                  </span>
-                  <span className="min-w-0 flex-1">{f.reason}</span>
+                    {f.value === null ? (
+                      <span className="text-xs text-muted">doesn&apos;t apply</span>
+                    ) : (
+                      <span className="font-display text-sm font-semibold tabular-nums">
+                        {f.points}
+                        <span className="font-normal text-muted"> / {f.max}</span>
+                      </span>
+                    )}
+                  </div>
+                  {f.value !== null && <Fill value={f.value} />}
+                  <p className="mt-1 text-sm">{f.reason}</p>
                 </li>
               ))}
             </ul>
             <p className="mt-3 text-xs text-muted">
-              A weighted blend of the signals above. Rating more movies sharpens the taste match.
+              The points add up to the score. Each bar fills from red to green by how good that signal looks, and the
+              number is how many points it adds out of what it could. Rating counts most, then streaks and season.
             </p>
           </>
         )}

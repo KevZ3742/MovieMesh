@@ -44,6 +44,7 @@ data/
   build_catalog.py
   explore_ratings.py
   README.txt
+  seasonal_movies.csv
 public/
   file.svg
   globe.svg
@@ -68,12 +69,28 @@ src/
     page.tsx
   components/
     Explorer.tsx
+    GradeLegend.tsx
+    LibraryPanel.tsx
     MeshCanvas.tsx
     MonthStrip.tsx
     MoviePanel.tsx
     nodes.tsx
     SearchBox.tsx
     SetupMessage.tsx
+  lib/
+    api.ts
+    catalog.ts
+    db.ts
+    detail.ts
+    images.ts
+    library.ts
+    links.ts
+    mesh.ts
+    score.ts
+    seasons.ts
+    tmdb.ts
+    types.ts
+    when.ts
 .env.example
 .gitignore
 AGENTS.md
@@ -89,377 +106,37 @@ tsconfig.json
 <files>
 This section contains the contents of the repository's files.
 
-<file path="data/build_catalog.py">
-"""
-Build catalog.db (SQLite) from MovieLens ml-32m files.
-
-Tables
-  movies(movie_id, title, alt_title, year, genres_raw, imdb_id, tmdb_id, n_ratings, avg_rating)
-  movie_genres(movie_id, genre)
-  movie_tags(movie_id, tag, n_taggers)      -- cleaned: spam user removed, >= MIN_TAGGERS distinct users, top TAGS_PER_MOVIE
-  seasonal_movies(movie_id, peak_month, lift, n, peak_years)   -- only if seasonal_movies.csv exists
-  movies_fts                                -- full-text search over title + alt_title (if SQLite has FTS5)
-
-Usage:  python build_catalog.py [path/to/ml-32m] [--ratings]
-  --ratings   also read ratings.csv to fill n_ratings / avg_rating (slow-ish; adds a popularity signal)
-Output: catalog.db in the current folder.
-"""
-import re
-import sqlite3
-import sys
-from pathlib import Path
-
-import numpy as np
-import pandas as pd
-
-SPAM_USER = 78213     # wrote ~36% of all tags
-MIN_TAGGERS = 3       # a tag must come from >= this many distinct users for that movie
-TAGS_PER_MOVIE = 20   # keep the most-agreed-upon tags per movie
-
-args = [a for a in sys.argv[1:] if not a.startswith("--")]
-use_ratings = "--ratings" in sys.argv
-root = Path(args[0] if args else ".")
-if not (root / "movies.csv").exists() and (root / "ml-32m" / "movies.csv").exists():
-    root = root / "ml-32m"
-for f in ("movies.csv", "links.csv", "tags.csv") + (("ratings.csv",) if use_ratings else ()):
-    if not (root / f).exists():
-        sys.exit(f"Can't find {f} in {root.resolve()}. Pass the folder containing the CSVs.")
-
-# ---------- movies ----------
-ARTICLE = re.compile(r"^(.*), (The|A|An|Les|La|Le|Los|Las|El|Il|Der|Die|Das|L')$")
-
-
-def split_title(raw):
-    """'City of Lost Children, The (Cité des enfants perdus, La) (1995)' -> ('The City of Lost Children', 'Cité des enfants perdus, La', 1995)"""
-    year = None
-    m = re.search(r"\((\d{4})\)\s*$", raw)
-    if m:
-        year, raw = int(m.group(1)), raw[:m.start()].strip()
-    main, _, alt = raw.partition(" (")
-    a = ARTICLE.match(main)
-    if a:
-        main = f"{a.group(2)}{'' if a.group(2).endswith(chr(39)) else ' '}{a.group(1)}"
-    return main.strip(), alt.rstrip(")").strip() or None, year
-
-
-movies = pd.read_csv(root / "movies.csv")
-parts = movies.title.map(split_title)
-movies["title_clean"] = [p[0] for p in parts]
-movies["alt_title"] = [p[1] for p in parts]
-movies["year"] = [p[2] for p in parts]
-
-links = pd.read_csv(root / "links.csv", dtype={"imdbId": str, "tmdbId": str})  # keep leading zeros on imdbId
-movies = movies.merge(links, on="movieId", how="left")
-movies["imdb_id"] = np.where(movies.imdbId.notna(), "tt" + movies.imdbId.fillna(""), None)
-movies["tmdb_id"] = pd.to_numeric(movies.tmdbId, errors="coerce")
-
-movies["n_ratings"] = None
-movies["avg_rating"] = None
-if use_ratings:
-    n_max = int(movies.movieId.max()) + 1
-    cnt, tot = np.zeros(n_max), np.zeros(n_max)
-    for chunk in pd.read_csv(root / "ratings.csv", usecols=["movieId", "rating"], chunksize=4_000_000):
-        mid = chunk.movieId.values
-        cnt += np.bincount(mid, minlength=n_max)
-        tot += np.bincount(mid, weights=chunk.rating.values, minlength=n_max)
-    c = cnt[movies.movieId.values]
-    movies["n_ratings"] = c.astype(int)
-    movies["avg_rating"] = np.where(c > 0, tot[movies.movieId.values] / np.maximum(c, 1), np.nan).round(3)
-
-genres = (movies[["movieId", "genres"]].assign(genre=movies.genres.str.split("|")).explode("genre")
-          .query("genre != '(no genres listed)'")[["movieId", "genre"]]
-          .rename(columns={"movieId": "movie_id"}))
-
-# ---------- tags ----------
-tags = pd.read_csv(root / "tags.csv", usecols=["userId", "movieId", "tag"])
-n_raw = len(tags)
-tags = tags[tags.userId != SPAM_USER].dropna(subset=["tag"])
-tags["tag"] = tags.tag.str.lower().str.replace(r"\s+", " ", regex=True).str.strip()
-tags = tags[tags.tag != ""]
-agg = (tags.groupby(["movieId", "tag"]).userId.nunique().rename("n_taggers").reset_index()
-       .query("n_taggers >= @MIN_TAGGERS")
-       .sort_values(["movieId", "n_taggers"], ascending=[True, False])
-       .groupby("movieId").head(TAGS_PER_MOVIE)
-       .rename(columns={"movieId": "movie_id"}))
-
-# ---------- write sqlite ----------
-db_path = Path.cwd() / "catalog.db"
-if db_path.exists():
-    db_path.unlink()
-con = sqlite3.connect(db_path)
-con.executescript("""
-CREATE TABLE movies(
-  movie_id INTEGER PRIMARY KEY, title TEXT NOT NULL, alt_title TEXT, year INTEGER,
-  genres_raw TEXT, imdb_id TEXT, tmdb_id INTEGER, n_ratings INTEGER, avg_rating REAL);
-CREATE TABLE movie_genres(movie_id INTEGER NOT NULL, genre TEXT NOT NULL);
-CREATE TABLE movie_tags(movie_id INTEGER NOT NULL, tag TEXT NOT NULL, n_taggers INTEGER NOT NULL);
-""")
-
-
-def obj(df):  # NaN/NA -> None so sqlite stores NULL
-    return df.astype(object).where(df.notna(), None)
-
-
-m_out = obj(movies[["movieId", "title_clean", "alt_title", "year", "genres", "imdb_id", "tmdb_id",
-                    "n_ratings", "avg_rating"]])
-m_out["year"] = m_out.year.map(lambda v: None if v is None else int(v))
-m_out["tmdb_id"] = m_out.tmdb_id.map(lambda v: None if v is None else int(v))
-con.executemany("INSERT INTO movies VALUES (?,?,?,?,?,?,?,?,?)", m_out.itertuples(index=False, name=None))
-genres.to_sql("movie_genres", con, if_exists="append", index=False)
-agg.to_sql("movie_tags", con, if_exists="append", index=False)
-con.executescript("""
-CREATE INDEX idx_genres_movie ON movie_genres(movie_id);
-CREATE INDEX idx_genres_genre ON movie_genres(genre);
-CREATE INDEX idx_tags_movie ON movie_tags(movie_id);
-CREATE INDEX idx_tags_tag ON movie_tags(tag);
-CREATE INDEX idx_movies_tmdb ON movies(tmdb_id);
-CREATE INDEX idx_movies_year ON movies(year);
-""")
-
-seasonal_csv = Path.cwd() / "seasonal_movies.csv"
-if seasonal_csv.exists():
-    s = pd.read_csv(seasonal_csv).rename(columns={"movieId": "movie_id"})
-    con.execute("CREATE TABLE seasonal_movies(movie_id INTEGER PRIMARY KEY, peak_month TEXT, lift REAL, n INTEGER, peak_years INTEGER)")
-    s[["movie_id", "peak_month", "lift", "n", "peak_years"]].to_sql("seasonal_movies", con, if_exists="append", index=False)
-
-fts = True
-try:
-    con.execute("CREATE VIRTUAL TABLE movies_fts USING fts5(title, alt_title, content='movies', content_rowid='movie_id')")
-    con.execute("INSERT INTO movies_fts(rowid, title, alt_title) SELECT movie_id, title, COALESCE(alt_title,'') FROM movies")
-except sqlite3.OperationalError:
-    fts = False
-con.commit()
-
-# ---------- report ----------
-q = lambda sql: con.execute(sql).fetchall()
-print(f"Wrote {db_path} ({db_path.stat().st_size/1e6:.1f} MB)")
-print(f"movies: {q('SELECT COUNT(*) FROM movies')[0][0]:,}")
-print(f"  no year: {q('SELECT COUNT(*) FROM movies WHERE year IS NULL')[0][0]:,} | "
-      f"no tmdb id: {q('SELECT COUNT(*) FROM movies WHERE tmdb_id IS NULL')[0][0]:,} | "
-      f"no genres: {q('SELECT COUNT(*) FROM movies WHERE movie_id NOT IN (SELECT movie_id FROM movie_genres)')[0][0]:,}")
-print(f"tags: {n_raw:,} raw rows -> {len(agg):,} kept (spam user removed, >= {MIN_TAGGERS} taggers, top {TAGS_PER_MOVIE}/movie)")
-print(f"  movies with >=1 tag: {agg.movie_id.nunique():,} | distinct tags kept: {agg.tag.nunique():,}")
-print(f"  no genres but has tags (tags can fill the gap): "
-      f"{q('SELECT COUNT(*) FROM movies WHERE movie_id NOT IN (SELECT movie_id FROM movie_genres) AND movie_id IN (SELECT movie_id FROM movie_tags)')[0][0]:,}")
-print("  most common tags:", ", ".join(f"{t} ({n})" for t, n in q("SELECT tag, COUNT(*) c FROM movie_tags GROUP BY tag ORDER BY c DESC LIMIT 25")))
-print("full-text search:", "yes" if fts else "no (this SQLite build lacks FTS5)")
-if seasonal_csv.exists():
-    print(f"seasonal_movies: {q('SELECT COUNT(*) FROM seasonal_movies')[0][0]:,}")
-print("sample:", q("SELECT movie_id, title, alt_title, year, tmdb_id FROM movies WHERE movie_id IN (1, 2, 11, 3114, 112556)"))
-</file>
-
-<file path="data/explore_ratings.py">
-"""
-Does ratings.csv contain a real "when" signal?  (v2)
-
-New in v2:
-  0. Threshold sensitivity: how do the results change if "bulk day" means >5, >15, >30, >100 ratings/day?
-  3. Recurrence check: a movie only counts as seasonal if its peak month repeats across
-     several different YEARS (filters out one-time bursts like a few users rating one movie in May 2015).
-  Exports seasonal_movies.csv (the movies that pass) to the current folder.
-
-Cleaning used for all tables (at the MAIN threshold):
-  - drops "bulk days" (user rating > MAIN movies in one day = backfilling, not watching)
-  - keeps only ratings made >= MIN_AGE_YEARS after release, so new releases don't look "seasonal"
-
-Usage:  python explore_ratings.py [path/to/ml-32m]
-"""
-import sys
-from pathlib import Path
-
-import numpy as np
-import pandas as pd
-
-THRESHOLDS = [5, 15, 30, 100]   # bulk-day thresholds to compare
-MAIN = 15                       # threshold used for sections 1-3 (must be in THRESHOLDS)
-MIN_AGE_YEARS = 2
-MIN_RATINGS_PER_MOVIE = 300     # section 3: movies with fewer clean ratings are skipped
-MIN_GROUP_RATINGS = 2000        # sections 1-2: skip groups with fewer ratings
-MIN_LIFT = 2.0                  # "recurring" needs peak-month lift >= this ...
-MIN_PEAK_YEARS = 4              # ... in at least this many different years (>= 3 ratings each) ...
-MIN_RATINGS_PER_PEAK_YEAR = 3
-MAX_TOP_YEAR_SHARE = 0.35       # ... and no single year may hold more than this share of peak-month ratings
-
-root = Path(sys.argv[1] if len(sys.argv) > 1 else ".")
-if not (root / "movies.csv").exists() and (root / "ml-32m" / "movies.csv").exists():
-    root = root / "ml-32m"
-if not (root / "movies.csv").exists():
-    sys.exit(f"Can't find movies.csv in {root.resolve()} (or its ml-32m subfolder). "
-             "Pass the folder containing the CSVs: python explore_ratings.py path/to/ml-32m")
-
-movies = pd.read_csv(root / "movies.csv")
-movies["year"] = movies.title.str.extract(r"\((\d{4})\)\s*$")[0].astype(float)
-N = int(movies.movieId.max()) + 1
-year_of = np.full(N, np.nan)
-year_of[movies.movieId.values] = movies.year.values
-title_of = movies.set_index("movieId").title
-
-tags = pd.read_csv(root / "tags.csv", usecols=["userId", "movieId", "tag"])
-tags = tags[tags.userId != 78213]  # one user wrote ~36% of all tags
-
-KEYWORDS = {
-    "christmas": r"\bchristmas\b|\bxmas\b",
-    "halloween": r"\bhalloween\b",
-    "valentine": r"\bvalentine",
-    "thanksgiving": r"\bthanksgiving\b",
-    "new year": r"\bnew year",
-    "summer": r"\bsummer\b",
-    "winter": r"\bwinter\b",
-    "beach": r"\bbeach\b",
-    "snow": r"\bsnow\b",
-    "spring": r"\bspring\b",
-}
-
-
-def ids_for(pattern):
-    by_title = movies.loc[movies.title.str.contains(pattern, case=False, regex=True), "movieId"]
-    t = tags.loc[tags.tag.str.contains(pattern, case=False, regex=True, na=False), "movieId"]
-    c = t.value_counts()
-    return set(by_title) | set(c[c >= 3].index)  # tag must come from >= 3 taggers
-
-
-kw_ids = {name: ids_for(p) for name, p in KEYWORDS.items()}
-genre_ids = {g: set(grp.movieId) for g, grp in
-             movies.assign(genre=movies.genres.str.split("|")).explode("genre").groupby("genre")
-             if g != "(no genres listed)"}
-
-# ---- one pass over ratings ----
-mms = {t: np.zeros(N * 12, dtype=np.int64) for t in THRESHOLDS}   # movie x month counts per threshold
-kept = {t: 0 for t in THRESHOLDS}
-rows = []                                                          # (movieId, year, month0) at MAIN threshold
-hour, dow = np.zeros(24), np.zeros(7)
-total = 0
-
-for chunk in pd.read_csv(root / "ratings.csv", chunksize=2_000_000):
-    dt = pd.to_datetime(chunk.timestamp, unit="s")
-    total += len(chunk)
-    size = chunk.groupby(["userId", dt.dt.floor("D")])["movieId"].transform("size").values
-    mid = chunk.movieId.values
-    yr = dt.dt.year.values
-    month = dt.dt.month.values - 1
-    ok_age = (yr - year_of[mid]) >= MIN_AGE_YEARS  # unknown release year -> NaN -> False -> dropped
-    for t in THRESHOLDS:
-        keep = (size <= t) & ok_age
-        kept[t] += int(keep.sum())
-        mms[t] += np.bincount(mid[keep] * 12 + month[keep], minlength=N * 12)
-        if t == MAIN:
-            rows.append(np.stack([mid[keep], yr[keep], month[keep]], 1).astype(np.int32))
-            hour += np.bincount(dt.dt.hour.values[keep], minlength=24)
-            dow += np.bincount(dt.dt.dayofweek.values[keep], minlength=7)
-
-mats = {t: m.reshape(N, 12) for t, m in mms.items()}
-M = "Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec".split()
-
-
-def group_lift(mat, ids):
-    ids = np.array(sorted(i for i in ids if i < N))
-    c = mat[ids].sum(0)
-    if c.sum() == 0:
-        return np.full(12, np.nan), 0
-    return c / c.sum() / (mat.sum(0) / mat.sum()), int(c.sum())
-
-
-print(f"{total:,} ratings read.\n")
-print("== 0. Sensitivity to the bulk-day threshold")
-print("   (does a stricter/looser definition of 'bulk day' change the conclusions?)")
-print(f"{'bulk if >':>10} {'kept':>12} {'%':>5} {'movies>=300':>12} {'xmas Dec':>9} {'hallo Oct':>10} {'horror Oct':>11}")
-for t in THRESHOLDS:
-    mat = mats[t]
-    n_m = mat.sum(1)
-    xm = group_lift(mat, kw_ids["christmas"])[0][11]
-    hw = group_lift(mat, kw_ids["halloween"])[0][9]
-    hr = group_lift(mat, genre_ids["Horror"])[0][9]
-    star = "  <- used below" if t == MAIN else ""
-    print(f"{t:>10} {kept[t]:>12,} {kept[t]/total:>5.0%} {(n_m >= MIN_RATINGS_PER_MOVIE).sum():>12,} "
-          f"{xm:>9.2f} {hw:>10.2f} {hr:>11.2f}{star}")
-
-mm = mats[MAIN]
-base = mm.sum(0) / mm.sum()
-header = " " * 16 + " ".join(f"{m:>5}" for m in M) + "   n"
-
-
-def lift_row(label, ids):
-    lift, n = group_lift(mm, ids)
-    if n < MIN_GROUP_RATINGS:
-        return None
-    return f"{label:>15} " + " ".join(f"{x:5.2f}" for x in lift) + f" {n:>8,}  peak {M[int(np.nanargmax(lift))]}"
-
-
-print(f"\n== 1. Keyword seasons at bulk threshold {MAIN} (lift 1.0 = no seasonality)")
-print(header)
-for name, ids in kw_ids.items():
-    print(lift_row(f"{name} ({len(ids)})", ids) or f"{name:>15} ({len(ids)} movies) too few ratings")
-
-print("\n== 2. By genre")
-print(header)
-for genre, ids in genre_ids.items():
-    row = lift_row(genre, ids)
-    if row:
-        print(row)
-
-# ---- section 3: individual movies, with recurrence check ----
-print(f"\n== 3. Individual movies: seasonal AND recurring (>= {MIN_RATINGS_PER_MOVIE} clean ratings)")
-n_m = mm.sum(1)
-cand = np.where(n_m >= MIN_RATINGS_PER_MOVIE)[0]
-if len(cand) == 0:
-    sys.exit("No movie has enough clean ratings for section 3 (is this a sample of ratings.csv?)")
-exp = np.outer(n_m[cand], base)
-effect = ((mm[cand] - exp) ** 2 / exp).sum(1) / n_m[cand]      # how uneven across months
-lift_m = mm[cand] / n_m[cand][:, None] / base
-peak, peak_lift = lift_m.argmax(1), lift_m.max(1)
-
-df = pd.DataFrame(np.concatenate(rows), columns=["movieId", "year", "month"])
-df = df[df.movieId.isin(cand)]
-df["peak"] = df.movieId.map(pd.Series(peak, index=cand))
-per_year = (df[df.month == df.peak].groupby(["movieId", "year"]).size().rename("c").reset_index())
-agg = per_year.groupby("movieId").c.agg(
-    peak_years=lambda x: int((x >= MIN_RATINGS_PER_PEAK_YEAR).sum()),
-    top_year_share=lambda x: x.max() / x.sum())
-
-res = pd.DataFrame({"movieId": cand, "title": [title_of.get(i, str(i)) for i in cand], "n": n_m[cand],
-                    "effect": effect, "peak_month": [M[p] for p in peak], "lift": peak_lift}).set_index("movieId")
-res = res.join(agg).fillna({"peak_years": 0, "top_year_share": 1.0})
-seasonal_enough = res.lift >= MIN_LIFT
-recurring = seasonal_enough & (res.peak_years >= MIN_PEAK_YEARS) & (res.top_year_share <= MAX_TOP_YEAR_SHARE)
-res["verdict"] = np.where(recurring, "RECURRING", np.where(seasonal_enough, "burst?", "weak"))
-
-print(f"Of {len(res):,} candidate movies: {int(recurring.sum())} RECURRING, "
-      f"{int((seasonal_enough & ~recurring).sum())} 'burst?' (high lift but not repeating across years), "
-      f"{int((~seasonal_enough).sum())} weak/none.")
-print(f"(median effect = {res.effect.median():.3f}: the noise floor)")
-print("\nRecurrence needs: lift >= %.1f, >= %d years with >= %d peak-month ratings, no year > %d%% of peak-month ratings."
-      % (MIN_LIFT, MIN_PEAK_YEARS, MIN_RATINGS_PER_PEAK_YEAR, MAX_TOP_YEAR_SHARE * 100))
-
-
-def show(frame, k=30):
-    print(f"{'effect':>7} {'n':>6} {'peak':>5} {'lift':>5} {'yrs':>4} {'topyr%':>7}  {'verdict':<9} title")
-    for _, r in frame.head(k).iterrows():
-        print(f"{r.effect:7.2f} {r.n:6,.0f} {r.peak_month:>5} {r.lift:5.2f} {r.peak_years:4.0f} "
-              f"{r.top_year_share:7.0%}  {r.verdict:<9} {r.title}")
-
-
-top = res.sort_values("effect", ascending=False)
-print("\n-- Top 30 by effect size, with verdicts (this is where Body Snatchers etc. should show as 'burst?')")
-show(top)
-print("\n-- Top 30 RECURRING movies (these are the trustworthy seasonal ones)")
-show(top[top.verdict == "RECURRING"])
-print("\n-- Recurring movies by peak month")
-print(top[top.verdict == "RECURRING"].peak_month.value_counts().reindex(M).fillna(0).astype(int).to_dict())
-
-out = Path.cwd() / "seasonal_movies.csv"
-top[top.verdict == "RECURRING"].reset_index()[
-    ["movieId", "title", "peak_month", "lift", "n", "peak_years", "top_year_share"]].to_csv(out, index=False)
-print(f"\nWrote {out}")
-
-print("\nHour-of-day share (UTC):", np.round(hour / hour.sum(), 3).tolist())
-print("Day-of-week share (Mon..Sun, UTC):", np.round(dow / dow.sum(), 3).tolist())
-</file>
-
 <file path="data/README.txt">
 Put catalog.db here (data/catalog.db).
 
 Build it with:  python build_catalog.py path/to/ml-32m --ratings
 (run explore_ratings.py first, from the same folder, so seasonal_movies.csv gets included)
+</file>
+
+<file path="data/seasonal_movies.csv">
+movieId,title,peak_month,lift,n,peak_years,top_year_share
+2423,Christmas Vacation (National Lampoon's Christmas Vacation) (1989),Dec,4.003739108310317,639,23,0.1179245283018868
+3087,Scrooged (1988),Dec,3.843632003320664,427,20,0.09558823529411764
+2083,"Muppet Christmas Carol, The (1992)",Dec,3.409003957747432,354,13,0.14
+8965,"Polar Express, The (2004)",Dec,3.010188798106238,445,16,0.16216216216216217
+2052,Hocus Pocus (1993),Oct,3.1028941903048493,358,9,0.22093023255813954
+6936,Elf (2003),Dec,2.9786172080818183,944,18,0.0944206008583691
+6957,Bad Santa (2003),Dec,3.0455202549970743,634,18,0.1625
+2804,"Christmas Story, A (1983)",Dec,2.9582726173417595,1028,23,0.21031746031746032
+2398,Miracle on 34th Street (1947),Dec,2.7661877454628656,397,15,0.12087912087912088
+953,It's a Wonderful Life (1946),Dec,2.6897729656745852,1337,24,0.11409395973154363
+317,"Santa Clause, The (1994)",Dec,2.561027925042154,622,23,0.08333333333333333
+1982,Halloween (1978),Oct,2.4483658020874457,823,21,0.14102564102564102
+3988,How the Grinch Stole Christmas (a.k.a. The Grinch) (2000),Dec,2.3418096671249025,639,16,0.10483870967741936
+277,Miracle on 34th Street (1994),Dec,2.380958926381328,370,9,0.136986301369863
+2953,Home Alone 2: Lost in New York (1992),Dec,2.3746909732828887,869,20,0.10526315789473684
+2459,"Texas Chainsaw Massacre, The (1974)",Oct,2.2927708369036406,569,11,0.1485148514851485
+3917,Hellraiser (1987),Oct,2.188366371578636,484,11,0.17073170731707318
+49286,"Holiday, The (2006)",Dec,2.2273534482177926,661,13,0.16393442622950818
+1342,Candyman (1992),Oct,2.049655840650474,334,6,0.20754716981132076
+97188,Sinister (2012),Oct,2.217716313860575,431,9,0.16216216216216217
+1974,Friday the 13th (1980),Oct,2.0654387536396768,419,9,0.11940298507462686
+1373,Star Trek V: The Final Frontier (1989),Dec,2.0477161782396904,442,11,0.26666666666666666
 </file>
 
 <file path="public/file.svg">
@@ -697,359 +374,102 @@ export default async function Home({
 }
 </file>
 
-<file path="src/components/Explorer.tsx">
-/* eslint-disable @next/next/no-img-element */
+<file path="src/components/LibraryPanel.tsx">
 "use client";
 
-import { useCallback, useMemo, useRef, useState } from "react";
-import { imageUrl } from "@/lib/images";
-import { MONTHS, monthColor } from "@/lib/seasons";
-import type { MeshMovieData, MeshNodeData, MeshPersonData, MovieDetail, TmdbStatus } from "@/lib/types";
-import { MeshCanvas } from "./MeshCanvas";
-import { MonthStrip } from "./MonthStrip";
-import { MoviePanel } from "./MoviePanel";
-import { SearchBox } from "./SearchBox";
+import { useState } from "react";
+import { setRating, setStatus, useLibrary } from "@/lib/library";
+import type { LibraryEntry, WatchStatus } from "@/lib/types";
 
-type Starter = { id: number; title: string; year: number; peakMonth: number | null; weak: boolean };
-type Selection =
-  | { kind: "movie"; id: number; detail: MovieDetail | null; via: string | null; error?: string }
-  | { kind: "person"; data: MeshPersonData }
-  | null;
+const tab = (on: boolean) =>
+  `flex-1 rounded-full border px-3 py-1.5 text-sm ${on ? "border-ink bg-ink text-surface" : "border-line hover:border-line-strong"}`;
+const small = "rounded-full border border-line px-2.5 py-1 text-xs hover:border-line-strong";
 
-const rootFrom = (d: MovieDetail): MeshMovieData => ({
-  kind: "movie",
-  movieId: d.movie.id,
-  title: d.movie.title,
-  year: d.movie.year,
-  tmdbId: d.movie.tmdbId,
-  posterPath: d.tmdb?.posterPath ?? null,
-  peakMonth: d.when.peakMonth,
-  weak: d.when.strength === "mild",
-  via: null,
+const snap = (id: string, e: LibraryEntry) => ({
+  movieId: Number(id),
+  title: e.title,
+  year: e.year,
+  genres: e.genres,
+  tags: e.tags,
 });
 
-async function fetchDetail(id: number): Promise<MovieDetail> {
-  const res = await fetch(`/api/movie/${id}`);
-  const body = await res.json();
-  if (!res.ok) throw new Error(body.error ?? "Couldn't load that movie.");
-  return body as MovieDetail;
-}
+const when = (at: number) =>
+  new Date(at).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
 
-export function Explorer({ starters, initial }: { starters: Starter[]; initial: MovieDetail | null }) {
-  // `initial` is loaded on the server when the URL has ?m=<id>, so the first paint already has the mesh root.
-  const [root, setRoot] = useState<MeshMovieData | null>(() => (initial ? rootFrom(initial) : null));
-  const [selection, setSelection] = useState<Selection>(() =>
-    initial ? { kind: "movie", id: initial.movie.id, detail: initial, via: null } : null,
-  );
-  const [notice, setNotice] = useState<string | null>(null);
-  const [tmdb, setTmdb] = useState<TmdbStatus | null>(null);
-  const now = useMemo(() => new Date(), []);
-  const cache = useRef(new Map<number, MovieDetail>(initial ? [[initial.movie.id, initial]] : []));
-
-  const loadDetail = useCallback(async (id: number) => {
-    const hit = cache.current.get(id);
-    if (hit) return hit;
-    const d = await fetchDetail(id);
-    cache.current.set(id, d);
-    return d;
-  }, []);
-
-  const choose = useCallback(
-    async (id: number) => {
-      setNotice(null);
-      try {
-        const d = await loadDetail(id);
-        setSelection({ kind: "movie", id, detail: d, via: null });
-        setRoot(rootFrom(d));
-        window.history.replaceState(null, "", `/?m=${id}`);
-      } catch (e) {
-        setNotice(e instanceof Error ? e.message : "Couldn't load that movie.");
-      }
-    },
-    [loadDetail],
-  );
-
-  const onSelect = useCallback(
-    async (data: MeshNodeData) => {
-      if (data.kind === "person") {
-        setSelection({ kind: "person", data });
-        return;
-      }
-      const id = data.movieId;
-      setSelection({ kind: "movie", id, detail: cache.current.get(id) ?? null, via: data.via });
-      try {
-        const d = await loadDetail(id);
-        setSelection((s) => (s?.kind === "movie" && s.id === id ? { ...s, detail: d } : s));
-      } catch (e) {
-        const error = e instanceof Error ? e.message : "Couldn't load that movie.";
-        setSelection((s) => (s?.kind === "movie" && s.id === id ? { ...s, error } : s));
-      }
-    },
-    [loadDetail],
-  );
-
-  const tmdbNote =
-    tmdb === "disabled"
-      ? "Add a TMDB key to see posters and actors in the mesh. See the README."
-      : tmdb === "unavailable"
-        ? "TMDB didn't respond, so posters and actors are hidden for now."
-        : null;
+/** Your watch history and plan-to-watch list. Only movies you marked yourself appear here. */
+export function LibraryPanel({ onOpen }: { onOpen: (movieId: number) => void }) {
+  const lib = useLibrary();
+  const [which, setWhich] = useState<WatchStatus>("watched");
+  const all = Object.entries(lib);
+  const counts = {
+    watched: all.filter(([, e]) => e.status === "watched").length,
+    planned: all.filter(([, e]) => e.status === "planned").length,
+  };
+  const rows = all.filter(([, e]) => e.status === which).sort((a, b) => b[1].at - a[1].at);
 
   return (
-    <div className="flex min-h-dvh flex-col lg:h-dvh">
-      <header className="flex flex-wrap items-center gap-x-6 gap-y-2 border-b border-line bg-surface px-4 py-3">
-        <h1 className="font-display text-xl font-semibold">MovieMesh</h1>
-        <SearchBox onChoose={choose} />
-        <p className="ml-auto flex items-center gap-2 text-sm text-muted" suppressHydrationWarning>
-          <span aria-hidden className="h-2.5 w-2.5 rounded-full" style={{ background: monthColor(now.getMonth()) }} />
-          It&apos;s {MONTHS[now.getMonth()]}
-        </p>
-      </header>
-
-      <div className="flex flex-1 flex-col lg:grid lg:min-h-0 lg:grid-cols-[minmax(0,1fr)_400px]">
-        <section aria-label="Movie mesh" className="relative h-[62dvh] border-b border-line lg:h-auto lg:border-b-0 lg:border-r">
-          {root ? (
-            <MeshCanvas key={root.movieId} root={root} onSelect={onSelect} onTmdb={setTmdb} onError={setNotice} />
-          ) : (
-            <div className="grid h-full place-items-center p-6">
-              <div className="max-w-md">
-                <h2 className="font-display text-3xl font-semibold leading-tight">Pick a movie to start your mesh</h2>
-                <p className="mt-3 text-muted">
-                  Each movie links to similar ones. Click any node to grow the mesh from it.
-                </p>
-                <ul className="mt-5 flex flex-wrap gap-2">
-                  {starters.map((s) => (
-                    <li key={s.id}>
-                      <button
-                        type="button"
-                        onClick={() => void choose(s.id)}
-                        className="flex items-center gap-2 rounded-full border border-line bg-surface px-3 py-1.5 text-sm hover:border-line-strong"
-                      >
-                        <span
-                          aria-hidden
-                          className="h-2.5 w-2.5 rounded-full"
-                          style={
-                            s.weak
-                              ? { border: `2px solid ${monthColor(s.peakMonth)}` }
-                              : { background: monthColor(s.peakMonth) }
-                          }
-                        />
-                        {s.title} ({s.year})
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            </div>
-          )}
-
-          <div className="pointer-events-none absolute left-3 top-3 z-10 flex max-w-sm flex-col gap-2" role="status">
-            {notice && (
-              <p className="pointer-events-auto rounded-md border border-line bg-surface px-3 py-2 text-sm shadow">{notice}</p>
-            )}
-            {!notice && tmdbNote && (
-              <p className="rounded-md border border-line bg-surface px-3 py-2 text-sm text-muted shadow">{tmdbNote}</p>
-            )}
-          </div>
-
-          {root && (
-            <div className="pointer-events-none absolute bottom-3 left-14 z-10 hidden w-60 rounded-md border border-line bg-surface/95 p-3 sm:block">
-              <MonthStrip all now={now} />
-              <p className="mt-2 text-xs text-muted">
-                A node&apos;s rim shows the month it&apos;s best watched. Grey means no seasonal pattern, and a dashed
-                rim is only a weak genre-level guess.
-              </p>
-            </div>
-          )}
-        </section>
-
-        <aside aria-label="Details" className="overflow-y-auto bg-surface p-5 lg:min-h-0">
-          {selection?.kind === "movie" && selection.detail && (
-            <MoviePanel detail={selection.detail} now={now} via={selection.via} showTmdbNote={false} />
-          )}
-          {selection?.kind === "movie" && !selection.detail && !selection.error && (
-            <p className="text-sm text-muted">Loading movie...</p>
-          )}
-          {selection?.kind === "movie" && selection.error && <p className="text-sm">{selection.error}</p>}
-          {selection?.kind === "person" && (
-            <div className="flex items-center gap-4">
-              {imageUrl(selection.data.profilePath, "w185") ? (
-                <img src={imageUrl(selection.data.profilePath, "w185")!} alt="" className="h-24 w-24 rounded-full object-cover" />
-              ) : (
-                <div aria-hidden className="grid h-24 w-24 place-items-center rounded-full bg-ground font-display text-3xl">
-                  {selection.data.name.slice(0, 1)}
-                </div>
-              )}
-              <div>
-                <h2 className="font-display text-2xl font-semibold">{selection.data.name}</h2>
-                {selection.data.character && <p className="text-sm text-muted">as {selection.data.character}</p>}
-                {selection.data.via && <p className="mt-1 text-sm text-muted">{selection.data.via}</p>}
-                <p className="mt-3 text-sm">Their other films in the catalog branch out from this node.</p>
-              </div>
-            </div>
-          )}
-          {!selection && (
-            <p className="max-w-prose text-sm text-muted">
-              Select a movie in the mesh to see when it&apos;s best to watch, what people tag it, and who&apos;s in it.
-            </p>
-          )}
-        </aside>
+    <section aria-label="My list" className="flex flex-col gap-4">
+      <h2 className="font-display text-2xl font-semibold">My list</h2>
+      <div className="flex gap-2" role="group" aria-label="List">
+        <button type="button" aria-pressed={which === "watched"} onClick={() => setWhich("watched")} className={tab(which === "watched")} suppressHydrationWarning>
+          Watched ({counts.watched})
+        </button>
+        <button type="button" aria-pressed={which === "planned"} onClick={() => setWhich("planned")} className={tab(which === "planned")} suppressHydrationWarning>
+          Plan to watch ({counts.planned})
+        </button>
       </div>
-    </div>
-  );
-}
-</file>
 
-<file path="src/components/MeshCanvas.tsx">
-"use client";
-
-import { useCallback, useEffect, useRef } from "react";
-import {
-  Background,
-  Controls,
-  ReactFlow,
-  ReactFlowProvider,
-  useEdgesState,
-  useNodesState,
-  useReactFlow,
-  type Edge,
-  type Node,
-  type NodeMouseHandler,
-} from "@xyflow/react";
-import "@xyflow/react/dist/style.css";
-import type { ExpandResponse, MeshMovieData, MeshNodeData, TmdbStatus } from "@/lib/types";
-import { MovieNode, PersonNode } from "./nodes";
-
-type FlowNode = Node<MeshNodeData>;
-const nodeTypes = { movie: MovieNode, person: PersonNode };
-
-type Point = { x: number; y: number };
-
-/** Fan new nodes out around `center`, away from the node it was reached from. */
-function place(center: Point, from: Point | null, count: number): Point[] {
-  if (!count) return [];
-  const radius = 280 + count * 14;
-  const full = !from;
-  const base = from ? Math.atan2(center.y - from.y, center.x - from.x) : -Math.PI / 2;
-  const arc = full ? Math.PI * 2 : Math.min(Math.PI * 1.2, 0.55 * count + 0.4);
-  return Array.from({ length: count }, (_, i) => {
-    const a = full ? base + (arc * i) / count : base - arc / 2 + (arc * (i + 0.5)) / count;
-    return { x: center.x + Math.cos(a) * radius, y: center.y + Math.sin(a) * radius };
-  });
-}
-
-type Props = {
-  root: MeshMovieData;
-  onSelect: (data: MeshNodeData) => void;
-  onTmdb: (status: TmdbStatus) => void;
-  onError: (message: string) => void;
-};
-
-/** Mount with `key={root.movieId}` so choosing a new movie starts a fresh mesh. */
-export function MeshCanvas(props: Props) {
-  return (
-    <ReactFlowProvider>
-      <Mesh {...props} />
-    </ReactFlowProvider>
-  );
-}
-
-function Mesh({ root, onSelect, onTmdb, onError }: Props) {
-  const [nodes, setNodes, onNodesChange] = useNodesState<FlowNode>([
-    { id: `m:${root.movieId}`, type: "movie", position: { x: 0, y: 0 }, data: root },
-  ]);
-  const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
-  const { fitView } = useReactFlow();
-  const expanded = useRef(new Set<string>());
-  const parents = useRef(new Map<string, string>());
-
-  const fit = useCallback(() => {
-    const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    window.setTimeout(() => void fitView({ padding: 0.25, maxZoom: 1, duration: reduce ? 0 : 450 }), 80);
-  }, [fitView]);
-
-  const expand = useCallback(
-    async (node: FlowNode) => {
-      const id = node.id;
-      if (expanded.current.has(id)) return;
-      expanded.current.add(id);
-      const setLoading = (loading: boolean) =>
-        setNodes((ns) => ns.map((n) => (n.id === id ? { ...n, data: { ...n.data, loading } } : n)));
-      setLoading(true);
-      try {
-        const d = node.data;
-        const url =
-          d.kind === "movie"
-            ? `/api/expand?type=movie&id=${d.movieId}`
-            : `/api/expand?type=person&id=${d.personId}&name=${encodeURIComponent(d.name)}`;
-        const res = await fetch(url);
-        const body = await res.json();
-        if (!res.ok) throw new Error(body.error ?? "Couldn't load connections.");
-        const data = body as ExpandResponse;
-        onTmdb(data.tmdb);
-
-        setNodes((ns) => {
-          const have = new Set(ns.map((n) => n.id));
-          const parent = ns.find((n) => n.id === id);
-          if (!parent) return ns;
-          const grand = ns.find((n) => n.id === parents.current.get(id));
-          const fresh = data.nodes.filter((n) => !have.has(n.id));
-          const spots = place(parent.position, grand?.position ?? null, fresh.length);
-          fresh.forEach((n) => parents.current.set(n.id, id));
-          return [...ns, ...fresh.map((n, i) => ({ id: n.id, type: n.kind, position: spots[i], data: n }))];
-        });
-        setEdges((es) => {
-          const have = new Set(es.map((e) => e.id));
-          const add = data.edges
-            .map((e) => ({ id: `${e.source}>${e.target}`, source: e.source, target: e.target }))
-            .filter((e) => !have.has(e.id) && !have.has(`${e.target}>${e.source}`));
-          return [...es, ...add];
-        });
-        if (data.nodes.length) fit();
-      } catch (e) {
-        expanded.current.delete(id);
-        onError(e instanceof Error ? e.message : "Couldn't load connections.");
-      } finally {
-        setLoading(false);
-      }
-    },
-    [fit, onError, onTmdb, setEdges, setNodes],
-  );
-
-  // Grow the first node once, as soon as the mesh appears.
-  useEffect(() => {
-    const t = setTimeout(() => void expand(nodes[0]), 0);
-    return () => clearTimeout(t);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  const onNodeClick: NodeMouseHandler<FlowNode> = useCallback(
-    (_, node) => {
-      onSelect(node.data);
-      void expand(node);
-    },
-    [expand, onSelect],
-  );
-
-  return (
-    <ReactFlow
-      nodes={nodes}
-      edges={edges}
-      onNodesChange={onNodesChange}
-      onEdgesChange={onEdgesChange}
-      nodeTypes={nodeTypes}
-      onNodeClick={onNodeClick}
-      nodesConnectable={false}
-      defaultEdgeOptions={{ type: "straight", style: { strokeWidth: 1.5 } }}
-      fitView
-      fitViewOptions={{ padding: 0.4, maxZoom: 1 }}
-      minZoom={0.2}
-      maxZoom={1.5}
-      colorMode="system"
-    >
-      <Background gap={28} size={1} color="var(--line)" />
-      <Controls showInteractive={false} />
-    </ReactFlow>
+      {rows.length === 0 ? (
+        <p className="text-sm text-muted">
+          {which === "watched"
+            ? "Nothing here yet. Open a movie and press Watched when you've seen it. Clicking nodes in the mesh doesn't count."
+            : "Nothing planned yet. Open a movie and press Plan to watch."}
+        </p>
+      ) : (
+        <ul className="divide-y divide-line">
+          {rows.map(([id, e]) => (
+            <li key={id} className="flex flex-col gap-2 py-3">
+              <div className="flex items-start justify-between gap-3">
+                <button type="button" onClick={() => onOpen(Number(id))} className="min-w-0 text-left">
+                  <span className="block font-medium leading-tight underline-offset-4 hover:underline">{e.title}</span>
+                  <span className="text-xs text-muted">
+                    {e.year ?? ""}
+                    {e.year ? " · " : ""}
+                    {which === "watched" ? "watched" : "added"} {when(e.at)}
+                  </span>
+                </button>
+                {which === "watched" && (
+                  <span className="flex shrink-0 text-base leading-none" role="group" aria-label="Your rating">
+                    {[1, 2, 3, 4, 5].map((n) => (
+                      <button
+                        key={n}
+                        type="button"
+                        aria-label={`Rate ${n} star${n > 1 ? "s" : ""}`}
+                        aria-pressed={e.rating === n}
+                        onClick={() => setRating(snap(id, e), n)}
+                        className={e.rating !== null && n <= e.rating ? "text-ink" : "text-line-strong"}
+                      >
+                        ★
+                      </button>
+                    ))}
+                  </span>
+                )}
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <button type="button" onClick={() => onOpen(Number(id))} className={small}>Open in mesh</button>
+                {which === "planned" && (
+                  <button type="button" onClick={() => setStatus(snap(id, e), "watched")} className={small}>Mark watched</button>
+                )}
+                {which === "watched" && (
+                  <button type="button" onClick={() => setStatus(snap(id, e), "planned")} className={small}>Move to plan</button>
+                )}
+                <button type="button" onClick={() => setStatus(snap(id, e), null)} className={small}>Remove</button>
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
   );
 }
 </file>
@@ -1080,218 +500,6 @@ export function MonthStrip({ peak = null, all = false, now }: { peak?: number | 
           <span className={`h-1 w-1 rounded-full ${current === i ? "bg-ink" : ""}`} />
         </div>
       ))}
-    </div>
-  );
-}
-</file>
-
-<file path="src/components/MoviePanel.tsx">
-/* eslint-disable @next/next/no-img-element */
-import { imageUrl } from "@/lib/images";
-import { monthColor, seasonStatus } from "@/lib/seasons";
-import type { MovieDetail } from "@/lib/types";
-import { MonthStrip } from "./MonthStrip";
-
-const chip = "rounded-full border border-line px-2.5 py-0.5 text-xs text-ink";
-
-function runtime(min: number | null) {
-  if (!min) return null;
-  const h = Math.floor(min / 60);
-  return h ? `${h}h ${min % 60}m` : `${min}m`;
-}
-
-/** Everything we know about one movie. Pure (no hooks), so it renders on the server and the client. */
-export function MoviePanel({
-  detail,
-  now,
-  via,
-  showTmdbNote = true,
-}: {
-  detail: MovieDetail;
-  now: Date;
-  via?: string | null;
-  /** The explorer already shows one TMDB notice over the canvas, so it turns this one off. */
-  showTmdbNote?: boolean;
-}) {
-  const { movie, when, tmdb, tmdbStatus } = detail;
-  const status = seasonStatus(when.peakMonth, now);
-  const color = monthColor(when.peakMonth);
-  const poster = imageUrl(tmdb?.posterPath ?? null, "w342");
-  const meta = [movie.year, runtime(tmdb?.runtime ?? null), movie.avgRating ? `${movie.avgRating.toFixed(1)} avg rating` : null]
-    .filter(Boolean);
-
-  return (
-    <article className="flex flex-col gap-6">
-      <header className="flex gap-4">
-        {poster ? (
-          <img src={poster} alt={`Poster for ${movie.title}`} className="h-36 w-24 shrink-0 rounded-md object-cover" />
-        ) : (
-          <div
-            aria-hidden
-            className="grid h-36 w-24 shrink-0 place-items-center rounded-md font-display text-3xl"
-            style={{ background: `color-mix(in srgb, ${color} 25%, var(--surface))` }}
-          >
-            {movie.title.slice(0, 1)}
-          </div>
-        )}
-        <div className="min-w-0">
-          <h2 className="font-display text-2xl font-semibold leading-tight">{movie.title}</h2>
-          {movie.altTitle && <p className="mt-0.5 text-sm text-muted">{movie.altTitle}</p>}
-          <p className="mt-2 flex flex-wrap gap-x-3 text-sm text-muted">
-            {meta.map((m) => (
-              <span key={String(m)}>{m}</span>
-            ))}
-          </p>
-          {tmdb?.tagline && <p className="mt-2 text-sm italic text-muted">{tmdb.tagline}</p>}
-          {via && <p className="mt-2 text-sm text-muted">Linked by: {via}</p>}
-        </div>
-      </header>
-
-      <section aria-labelledby="when-h">
-        <h3 id="when-h" className="font-display text-base font-semibold">When to watch</h3>
-        <p className="mt-2 flex items-center gap-2 font-display text-xl">
-          <span aria-hidden className="h-3 w-3 rounded-full" style={{ background: color }} />
-          {status.label}
-        </p>
-        <div className="mt-3">
-          <MonthStrip peak={when.peakMonth} now={now} />
-        </div>
-        <p className="mt-3 text-sm text-muted">
-          {when.reason}
-          {when.strength === "mild" && " This is a weak, genre-level pattern."}
-        </p>
-      </section>
-
-      {tmdb?.overview && <p className="max-w-prose text-sm leading-relaxed">{tmdb.overview}</p>}
-      {showTmdbNote && tmdbStatus === "disabled" && (
-        <p className="text-sm text-muted">Posters, summaries and cast need a TMDB key. See the README.</p>
-      )}
-      {showTmdbNote && tmdbStatus === "unavailable" && (
-        <p className="text-sm text-muted">TMDB didn&apos;t respond for this movie, so posters and cast are hidden for now.</p>
-      )}
-
-      {movie.genres.length > 0 && (
-        <section aria-labelledby="genres-h">
-          <h3 id="genres-h" className="font-display text-base font-semibold">Genres</h3>
-          <ul className="mt-2 flex flex-wrap gap-1.5">
-            {movie.genres.map((g) => (
-              <li key={g} className={chip}>{g}</li>
-            ))}
-          </ul>
-        </section>
-      )}
-
-      {movie.tags.length > 0 && (
-        <section aria-labelledby="tags-h">
-          <h3 id="tags-h" className="font-display text-base font-semibold">What people tag it</h3>
-          <ul className="mt-2 flex flex-wrap gap-1.5">
-            {movie.tags.slice(0, 12).map((t) => (
-              <li key={t.tag} className={chip}>{t.tag}</li>
-            ))}
-          </ul>
-        </section>
-      )}
-
-      {tmdb && tmdb.cast.length > 0 && (
-        <section aria-labelledby="cast-h">
-          <h3 id="cast-h" className="font-display text-base font-semibold">Cast</h3>
-          <ul className="mt-2 space-y-1 text-sm">
-            {tmdb.cast.slice(0, 8).map((c) => (
-              <li key={c.id}>
-                {c.name}
-                {c.character && <span className="text-muted"> as {c.character}</span>}
-              </li>
-            ))}
-          </ul>
-        </section>
-      )}
-
-      {tmdb && (
-        <p className="text-xs text-muted">
-          This product uses the TMDB API but is not endorsed or certified by TMDB.
-        </p>
-      )}
-    </article>
-  );
-}
-</file>
-
-<file path="src/components/nodes.tsx">
-"use client";
-/* eslint-disable @next/next/no-img-element */
-
-import { Handle, Position, type Node, type NodeProps } from "@xyflow/react";
-import { imageUrl } from "@/lib/images";
-import { monthColor, monthsUntil } from "@/lib/seasons";
-import type { MeshMovieData, MeshPersonData } from "@/lib/types";
-
-// Edges run centre to centre, so both handles sit invisibly in the middle of the node.
-const anchor = { opacity: 0, pointerEvents: "none" as const, left: "50%", top: "50%" };
-const Anchors = () => (
-  <>
-    <Handle type="target" position={Position.Top} style={anchor} />
-    <Handle type="source" position={Position.Top} style={anchor} />
-  </>
-);
-
-export function MovieNode({ data, selected }: NodeProps<Node<MeshMovieData, "movie">>) {
-  const color = monthColor(data.peakMonth);
-  const inSeason = !data.weak && data.peakMonth !== null && monthsUntil(data.peakMonth) === 0;
-  const poster = imageUrl(data.posterPath, "w92");
-  return (
-    <div
-      className="flex w-44 items-center gap-2.5 rounded-lg bg-surface p-2 text-left"
-      style={{
-        border: `3px ${data.weak ? "dashed" : "solid"} ${color}`,
-        boxShadow: selected
-          ? "0 0 0 3px var(--ink)"
-          : inSeason
-            ? `0 0 0 5px color-mix(in srgb, ${color} 30%, transparent)`
-            : "0 1px 2px rgb(0 0 0 / 0.1)",
-      }}
-    >
-      <Anchors />
-      {poster ? (
-        <img src={poster} alt="" className="h-14 w-10 shrink-0 rounded object-cover" />
-      ) : (
-        <div
-          aria-hidden
-          className="grid h-14 w-10 shrink-0 place-items-center rounded font-display text-base"
-          style={{ background: `color-mix(in srgb, ${color} 25%, var(--surface))` }}
-        >
-          {data.title.slice(0, 1)}
-        </div>
-      )}
-      <div className="min-w-0">
-        <p className="line-clamp-2 text-[13px] font-medium leading-tight">{data.title}</p>
-        <p className="mt-0.5 text-xs text-muted">{data.loading ? "Loading..." : (data.year ?? "")}</p>
-      </div>
-    </div>
-  );
-}
-
-export function PersonNode({ data, selected }: NodeProps<Node<MeshPersonData, "person">>) {
-  const photo = imageUrl(data.profilePath, "w92");
-  return (
-    <div
-      className="flex w-40 items-center gap-2 rounded-full bg-surface py-1.5 pl-1.5 pr-3"
-      style={{
-        border: "2px solid var(--line-strong)",
-        boxShadow: selected ? "0 0 0 3px var(--ink)" : "0 1px 2px rgb(0 0 0 / 0.1)",
-      }}
-    >
-      <Anchors />
-      {photo ? (
-        <img src={photo} alt="" className="h-9 w-9 shrink-0 rounded-full object-cover" />
-      ) : (
-        <div aria-hidden className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-ground text-sm">
-          {data.name.slice(0, 1)}
-        </div>
-      )}
-      <div className="min-w-0">
-        <p className="line-clamp-1 text-xs font-medium">{data.name}</p>
-        <p className="text-[11px] text-muted">{data.loading ? "Loading..." : "Actor"}</p>
-      </div>
     </div>
   );
 }
@@ -1427,6 +635,579 @@ export function SetupMessage({ message }: { message: string }) {
 }
 </file>
 
+<file path="src/lib/api.ts">
+import { CatalogMissingError } from "./db";
+
+/** Turns thrown errors into JSON responses a person can act on. */
+export function apiError(err: unknown): Response {
+  if (err instanceof CatalogMissingError) return Response.json({ error: err.message }, { status: 500 });
+  console.error(err);
+  return Response.json({ error: "Something went wrong reading the catalog. Check the server log." }, { status: 500 });
+}
+</file>
+
+<file path="src/lib/catalog.ts">
+import { getDb, hasTable } from "./db";
+import { MONTH_SHORT } from "./seasons";
+import type { Movie, MovieSummary, SearchHit } from "./types";
+
+const ph = (n: number) => Array(n).fill("?").join(",");
+const words = (s: string) => s.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [];
+// "A Christmas Story" and "Christmas Story" should count as the same title when ranking.
+const norm = (s: string) => words(s).filter((w, i) => !(i === 0 && ["a", "an", "the"].includes(w))).join(" ");
+
+function genresFor(ids: number[]): Map<number, string[]> {
+  const out = new Map<number, string[]>();
+  if (!ids.length) return out;
+  const rows = getDb()
+    .prepare(`SELECT movie_id id, genre FROM movie_genres WHERE movie_id IN (${ph(ids.length)}) ORDER BY genre`)
+    .all(...ids) as { id: number; genre: string }[];
+  for (const r of rows) (out.get(r.id) ?? out.set(r.id, []).get(r.id)!).push(r.genre);
+  return out;
+}
+
+export function getMovie(id: number): Movie | null {
+  const db = getDb();
+  const r = db
+    .prepare(
+      `SELECT movie_id id, title, alt_title altTitle, year, imdb_id imdbId, tmdb_id tmdbId,
+              n_ratings nRatings, avg_rating avgRating FROM movies WHERE movie_id = ?`,
+    )
+    .get(id) as Omit<Movie, "genres" | "tags" | "seasonal"> | undefined;
+  if (!r) return null;
+  const tags = db
+    .prepare("SELECT tag, n_taggers n FROM movie_tags WHERE movie_id = ? ORDER BY n_taggers DESC, tag LIMIT 20")
+    .all(id) as Movie["tags"];
+
+  let seasonal: Movie["seasonal"] = null;
+  if (hasTable("seasonal_movies")) {
+    const s = db
+      .prepare("SELECT peak_month pm, lift, peak_years py FROM seasonal_movies WHERE movie_id = ?")
+      .get(id) as { pm: string; lift: number; py: number } | undefined;
+    const idx = s ? MONTH_SHORT.indexOf(s.pm) : -1;
+    if (s && idx >= 0) seasonal = { peakMonth: idx, lift: s.lift, peakYears: s.py };
+  }
+  return { ...r, genres: genresFor([id]).get(id) ?? [], tags, seasonal };
+}
+
+/** Full-text title search, re-ranked so exact titles and well-known movies come first. */
+export function searchMovies(q: string, limit = 8): SearchHit[] {
+  const db = getDb();
+  const tokens = words(q);
+  if (!tokens.length) return [];
+  const qNorm = norm(q);
+
+  type Row = { id: number; title: string; year: number | null; nRatings: number | null; hasTags: number };
+  const base = `SELECT m.movie_id id, m.title, m.year, m.n_ratings nRatings,
+                       EXISTS(SELECT 1 FROM movie_tags t WHERE t.movie_id = m.movie_id) hasTags`;
+  const like = () =>
+    db.prepare(`${base} FROM movies m WHERE m.title LIKE ? LIMIT 200`).all(`%${tokens.join("%")}%`) as Row[];
+  let rows: Row[];
+  if (hasTable("movies_fts")) {
+    // Tokens are quoted so user input can never be read as FTS operators; last token is a prefix match.
+    const match = tokens.map((t, i) => (i === tokens.length - 1 ? `"${t}"*` : `"${t}"`)).join(" ");
+    try {
+      rows = db
+        .prepare(`${base} FROM movies_fts f JOIN movies m ON m.movie_id = f.rowid
+                  WHERE movies_fts MATCH ? ORDER BY bm25(movies_fts) LIMIT 60`)
+        .all(match) as Row[];
+    } catch {
+      rows = like(); // this SQLite build has no FTS5: fall back to a plain title search
+    }
+  } else {
+    rows = like();
+  }
+
+  const score = (r: Row) => {
+    const t = norm(r.title);
+    let s = t === qNorm ? 1000 : t.startsWith(qNorm) ? 200 : 0;
+    s += r.nRatings != null ? Math.min(60, Math.log10(1 + r.nRatings) * 12) : r.hasTags ? 40 : 0;
+    return s - t.length * 0.2;
+  };
+  const top = rows.sort((a, b) => score(b) - score(a)).slice(0, limit);
+  const g = genresFor(top.map((r) => r.id));
+  return top.map((r) => ({ id: r.id, title: r.title, year: r.year, genres: g.get(r.id) ?? [] }));
+}
+
+export function getMoviesByTmdbIds(tmdbIds: number[]): MovieSummary[] {
+  if (!tmdbIds.length) return [];
+  const rows = getDb()
+    .prepare(`SELECT movie_id id, title, year, tmdb_id tmdbId FROM movies WHERE tmdb_id IN (${ph(tmdbIds.length)})`)
+    .all(...tmdbIds) as Omit<MovieSummary, "genres">[];
+  const g = genresFor(rows.map((r) => r.id));
+  const order = new Map(tmdbIds.map((id, i) => [id, i]));
+  return rows
+    .map((r) => ({ ...r, genres: g.get(r.id) ?? [] }))
+    .sort((a, b) => order.get(a.tmdbId!)! - order.get(b.tmdbId!)!);
+}
+
+export type SimilarHit = { movie: MovieSummary; via: string; score: number };
+
+let hasPopularity: boolean | null = null;
+
+/**
+ * Content-based neighbours from shared tags and genres.
+ * PLACEHOLDER for the real recommender: when catalog.db has n_ratings (build_catalog.py --ratings)
+ * popularity is used as a signal; without it, "has agreed-upon tags" stands in for "well known".
+ */
+export function getSimilar(id: number, limit = 6): SimilarHit[] {
+  const db = getDb();
+  const t = getMovie(id);
+  if (!t) return [];
+  if (hasPopularity === null) {
+    hasPopularity = !!db.prepare("SELECT 1 FROM movies WHERE n_ratings IS NOT NULL LIMIT 1").get();
+  }
+
+  const tagNames = t.tags.map((x) => x.tag);
+  const cand = new Set<number>();
+  if (tagNames.length) {
+    const rows = db
+      .prepare(`SELECT movie_id id FROM movie_tags WHERE tag IN (${ph(tagNames.length)}) AND movie_id != ?
+                GROUP BY movie_id ORDER BY COUNT(*) DESC LIMIT 300`)
+      .all(...tagNames, id) as { id: number }[];
+    rows.forEach((r) => cand.add(r.id));
+  }
+  if (t.genres.length) {
+    const rows = db
+      .prepare(`SELECT g.movie_id id FROM movie_genres g JOIN movies m ON m.movie_id = g.movie_id
+                WHERE g.genre IN (${ph(t.genres.length)}) AND g.movie_id != ?
+                ${hasPopularity ? "" : "AND EXISTS (SELECT 1 FROM movie_tags x WHERE x.movie_id = g.movie_id)"}
+                GROUP BY g.movie_id HAVING COUNT(*) >= ?
+                ORDER BY COALESCE(m.n_ratings, 0) DESC, ABS(COALESCE(m.year, 0) - ?) ASC LIMIT 300`)
+      .all(...t.genres, id, Math.min(2, t.genres.length), t.year ?? 0) as { id: number }[];
+    rows.forEach((r) => cand.add(r.id));
+  }
+  const ids = [...cand];
+  if (!ids.length) return [];
+
+  const info = new Map(
+    (db
+      .prepare(`SELECT movie_id id, title, year, tmdb_id tmdbId, n_ratings nRatings FROM movies WHERE movie_id IN (${ph(ids.length)})`)
+      .all(...ids) as { id: number; title: string; year: number | null; tmdbId: number | null; nRatings: number | null }[]
+    ).map((r) => [r.id, r]),
+  );
+  const genres = genresFor(ids);
+  const tagCount = new Map(
+    (db
+      .prepare(`SELECT movie_id id, COUNT(*) c FROM movie_tags WHERE movie_id IN (${ph(ids.length)}) GROUP BY movie_id`)
+      .all(...ids) as { id: number; c: number }[]
+    ).map((r) => [r.id, r.c]),
+  );
+  const shared = new Map<number, string[]>();
+  if (tagNames.length) {
+    const rows = db
+      .prepare(`SELECT movie_id id, tag FROM movie_tags WHERE movie_id IN (${ph(ids.length)}) AND tag IN (${ph(tagNames.length)})`)
+      .all(...ids, ...tagNames) as { id: number; tag: string }[];
+    for (const r of rows) (shared.get(r.id) ?? shared.set(r.id, []).get(r.id)!).push(r.tag);
+  }
+
+  const G = new Set(t.genres);
+  const hits: SimilarHit[] = [];
+  for (const cid of ids) {
+    const m = info.get(cid);
+    if (!m) continue;
+    const gc = genres.get(cid) ?? [];
+    const sharedGenres = gc.filter((g) => G.has(g));
+    const sharedTags = (shared.get(cid) ?? []).sort((a, b) => tagNames.indexOf(a) - tagNames.indexOf(b));
+    // Must have something concrete in common, not just one broad genre.
+    if (!sharedTags.length && sharedGenres.length < Math.min(2, t.genres.length)) continue;
+
+    const genreJ = sharedGenres.length / (G.size + gc.length - sharedGenres.length || 1);
+    const tc = tagCount.get(cid) ?? 0;
+    const tagCos = tagNames.length && tc ? sharedTags.length / Math.sqrt(tagNames.length * tc) : 0;
+    const yearProx = t.year && m.year ? Math.exp(-Math.abs(t.year - m.year) / 15) : 0.3;
+    const pop = m.nRatings != null ? Math.min(1, Math.log10(1 + m.nRatings) / 5) : tc > 0 ? 0.6 : 0;
+    const score = tagNames.length
+      ? 0.45 * tagCos + 0.3 * genreJ + 0.1 * yearProx + 0.15 * pop
+      : 0.6 * genreJ + 0.2 * yearProx + 0.2 * pop;
+
+    hits.push({
+      movie: { id: cid, title: m.title, year: m.year, genres: gc, tmdbId: m.tmdbId },
+      via: sharedTags.length ? sharedTags.slice(0, 3).join(", ") : sharedGenres.join(", "),
+      score,
+    });
+  }
+  return hits.sort((a, b) => b.score - a.score).slice(0, limit);
+}
+
+const STARTERS: [string, number][] = [
+  ["Elf", 2003], ["The Shining", 1980], ["Jaws", 1975],
+  ["Home Alone", 1990], ["Gone Girl", 2014], ["Toy Story", 1995],
+];
+
+export function getStarters(): { id: number; title: string; year: number }[] {
+  const q = getDb().prepare("SELECT movie_id id, title, year FROM movies WHERE title = ? AND year = ?");
+  return STARTERS.map(([t, y]) => q.get(t, y) as { id: number; title: string; year: number } | undefined).filter(
+    (r): r is { id: number; title: string; year: number } => !!r,
+  );
+}
+</file>
+
+<file path="src/lib/db.ts">
+import path from "node:path";
+// Node's built-in SQLite (Node 22.13+). No native module to compile, so no Visual Studio / node-gyp on Windows.
+import { DatabaseSync } from "node:sqlite";
+
+export class CatalogMissingError extends Error {
+  constructor(public file: string) {
+    super(`catalog.db not found at ${file}. Copy your catalog.db to data/catalog.db or set CATALOG_DB.`);
+  }
+}
+
+/** The small slice of the SQLite API this app uses. Rows are untyped; callers cast them. */
+export type Db = {
+  prepare(sql: string): {
+    all(...params: (string | number)[]): unknown[];
+    get(...params: (string | number)[]): unknown;
+  };
+};
+
+const g = globalThis as unknown as { __catalog?: Db; __tables?: Map<string, boolean> };
+
+export function getDb(): Db {
+  if (g.__catalog) return g.__catalog;
+  const file = process.env.CATALOG_DB || path.join(process.cwd(), "data", "catalog.db");
+  try {
+    // readOnly never creates a file, so a wrong path fails here instead of silently making an empty database.
+    const raw = new DatabaseSync(file, { readOnly: true });
+    // node:sqlite returns rows with a null prototype, which React refuses to pass from a Server Component
+    // to a Client Component. Copy each row into a plain object once, here, so nothing downstream has to care.
+    const plain = (row: unknown) => (row && typeof row === "object" ? { ...(row as object) } : row);
+    g.__catalog = {
+      prepare(sql) {
+        const stmt = raw.prepare(sql);
+        return {
+          all: (...params) => stmt.all(...params).map(plain),
+          get: (...params) => plain(stmt.get(...params)),
+        };
+      },
+    };
+  } catch (err) {
+    if (err instanceof Error && /unable to open|does not exist|cannot open/i.test(err.message)) {
+      throw new CatalogMissingError(file);
+    }
+    throw err;
+  }
+  g.__tables = new Map();
+  return g.__catalog;
+}
+
+/** Optional tables (seasonal_movies, movies_fts) may not exist in every catalog build. */
+export function hasTable(name: string): boolean {
+  const db = getDb();
+  const cache = g.__tables!;
+  if (!cache.has(name)) {
+    cache.set(name, !!db.prepare("SELECT 1 FROM sqlite_master WHERE name = ?").get(name));
+  }
+  return cache.get(name)!;
+}
+</file>
+
+<file path="src/lib/images.ts">
+/** TMDB image URLs. Client-safe: no fetching, no secrets. */
+export const imageUrl = (p: string | null, size: "w92" | "w185" | "w342" = "w185") =>
+  p ? `https://image.tmdb.org/t/p/${size}${p}` : null;
+</file>
+
+<file path="src/lib/library.ts">
+"use client";
+// Watched / plan-to-watch tracker. Lives in localStorage for now (no accounts needed);
+// swap read()/write() for API calls later and nothing else has to change.
+
+import { useSyncExternalStore } from "react";
+import type { Library, LibraryEntry, MovieFeatures, WatchStatus } from "./types";
+
+const KEY = "moviemesh:library:v1";
+const EMPTY: Library = {}; // server snapshot: the server never sees localStorage
+
+let cache: Library | null = null; // snapshots must be referentially stable between changes
+const listeners = new Set<() => void>();
+
+function read(): Library {
+  if (cache) return cache;
+  try {
+    const raw = window.localStorage.getItem(KEY);
+    cache = raw ? (JSON.parse(raw) as Library) : {};
+  } catch {
+    cache = {};
+  }
+  return cache;
+}
+
+function write(next: Library) {
+  cache = next;
+  try {
+    window.localStorage.setItem(KEY, JSON.stringify(next));
+  } catch {
+    // storage full or blocked: the change still works for this session
+  }
+  listeners.forEach((l) => l());
+}
+
+function subscribe(cb: () => void) {
+  listeners.add(cb);
+  const onStorage = (e: StorageEvent) => {
+    if (e.key !== KEY) return;
+    cache = null; // another tab changed it
+    cb();
+  };
+  window.addEventListener("storage", onStorage);
+  return () => {
+    listeners.delete(cb);
+    window.removeEventListener("storage", onStorage);
+  };
+}
+
+export function useLibrary(): Library {
+  return useSyncExternalStore(subscribe, read, () => EMPTY);
+}
+
+type Snap = Pick<MovieFeatures, "movieId" | "title" | "year" | "genres" | "tags">;
+
+const entryFor = (m: Snap, status: WatchStatus, rating: number | null, prev?: LibraryEntry): LibraryEntry => ({
+  status,
+  rating,
+  title: m.title,
+  year: m.year,
+  genres: m.genres,
+  tags: m.tags,
+  // `at` = when it entered its current list, so history sorts by when you actually marked it
+  at: prev && prev.status === status ? prev.at : Date.now(),
+});
+
+/** Mark a movie watched / planned, or pass null to remove it from the library. */
+export function setStatus(m: Snap, status: WatchStatus | null) {
+  const lib = { ...read() };
+  const key = String(m.movieId);
+  if (status === null) delete lib[key];
+  else lib[key] = entryFor(m, status, status === "watched" ? (lib[key]?.rating ?? null) : null, lib[key]);
+  write(lib);
+}
+
+/** Rate a movie 1-5 (rating a movie implies you watched it). Rating the same value again clears it. */
+export function setRating(m: Snap, rating: number | null) {
+  const lib = { ...read() };
+  const key = String(m.movieId);
+  const prev = lib[key];
+  const next = prev?.rating === rating ? null : rating;
+  lib[key] = entryFor(m, "watched", next, prev);
+  write(lib);
+}
+</file>
+
+<file path="src/lib/links.ts">
+// Decides whether a movie dropped onto the mesh (e.g. from your list) belongs next to
+// anything that is already there. Pure, so it runs on the client against node data.
+
+import type { MovieFeatures } from "./types";
+
+export type Link = { nodeId: string; via: string; score: number };
+
+/** At most this many movie-to-movie links for one new node; actors it appears with are all linked. */
+export const MAX_MOVIE_LINKS = 3;
+
+/** Same ingredients as the server's getSimilar, but a yes/no with a reason. */
+export function movieLink(a: MovieFeatures, b: MovieFeatures): { via: string; score: number } | null {
+  const bTags = new Set(b.tags);
+  const bGenres = new Set(b.genres);
+  const sharedTags = a.tags.filter((t) => bTags.has(t));
+  const sharedGenres = a.genres.filter((g) => bGenres.has(g));
+
+  const hasTags = a.tags.length > 0 && b.tags.length > 0;
+  const concrete = hasTags
+    ? sharedTags.length >= 2 || (sharedTags.length >= 1 && sharedGenres.length >= 1)
+    : sharedGenres.length >= 2; // no tags to go on: need more than one broad genre in common
+  if (!concrete) return null;
+
+  const tagDice = hasTags ? (2 * sharedTags.length) / (a.tags.length + b.tags.length) : 0;
+  const genreJ = sharedGenres.length / (new Set([...a.genres, ...b.genres]).size || 1);
+  return {
+    score: hasTags ? 0.6 * tagDice + 0.4 * genreJ : genreJ,
+    via: (sharedTags.length ? sharedTags.slice(0, 3) : sharedGenres).join(", "),
+  };
+}
+
+type NodeLike = { id: string; data: { kind: "movie" | "person"; movieId?: number; personId?: number } & Partial<MovieFeatures> };
+
+/** Which existing nodes should the new movie connect to? Empty means "leave it unconnected". */
+export function findLinks(movie: MovieFeatures, castIds: number[], nodes: NodeLike[]): Link[] {
+  const cast = new Set(castIds);
+  const people: Link[] = [];
+  const movies: Link[] = [];
+  for (const n of nodes) {
+    if (n.data.kind === "person") {
+      if (n.data.personId != null && cast.has(n.data.personId)) people.push({ nodeId: n.id, via: "cast", score: 1 });
+    } else if (n.data.movieId !== movie.movieId) {
+      const l = movieLink(movie, n.data as MovieFeatures);
+      if (l) movies.push({ nodeId: n.id, ...l });
+    }
+  }
+  movies.sort((a, b) => b.score - a.score);
+  return [...movies.slice(0, MAX_MOVIE_LINKS), ...people];
+}
+
+type Pt = { x: number; y: number };
+
+/** A spot on a ring around `anchor` that is as far as possible from every other node. */
+export function spotNear(anchor: Pt, awayFrom: Pt | null, others: Pt[], radius = 300): Pt {
+  const base = awayFrom ? Math.atan2(anchor.y - awayFrom.y, anchor.x - awayFrom.x) : -Math.PI / 2;
+  let best = { x: anchor.x + Math.cos(base) * radius, y: anchor.y + Math.sin(base) * radius };
+  let bestGap = -1;
+  for (let i = 0; i < 24; i++) {
+    // fan out from the direction pointing away from where the anchor came from
+    const a = base + (i % 2 ? 1 : -1) * Math.ceil(i / 2) * ((Math.PI * 2) / 24);
+    const p = { x: anchor.x + Math.cos(a) * radius, y: anchor.y + Math.sin(a) * radius };
+    const gap = Math.min(...others.map((o) => Math.hypot(o.x - p.x, o.y - p.y)), Infinity);
+    if (gap > bestGap + 40) { // prefer earlier (more "outward") angles unless a later one is clearly roomier
+      best = p;
+      bestGap = gap;
+    }
+  }
+  return best;
+}
+
+/** A spot to the right of everything, for movies that connect to nothing. */
+export function spotAside(others: Pt[]): Pt {
+  if (!others.length) return { x: 0, y: 0 };
+  const maxX = Math.max(...others.map((o) => o.x));
+  const ys = others.map((o) => o.y);
+  return { x: maxX + 320, y: (Math.min(...ys) + Math.max(...ys)) / 2 };
+}
+</file>
+
+<file path="src/lib/tmdb.ts">
+import type { CastMember, TmdbMovie } from "./types";
+
+const BASE = "https://api.themoviedb.org/3";
+const DAY = 60 * 60 * 24;
+
+/** Works with either a v4 "read access token" (TMDB_READ_TOKEN) or a v3 key (TMDB_API_KEY). */
+export function tmdbEnabled(): boolean {
+  return !!(process.env.TMDB_READ_TOKEN || process.env.TMDB_API_KEY);
+}
+
+async function tmdbGet<T>(pathname: string, params: Record<string, string> = {}): Promise<T | null> {
+  if (!tmdbEnabled()) return null;
+  const url = new URL(BASE + pathname);
+  const headers: Record<string, string> = { accept: "application/json" };
+  if (process.env.TMDB_READ_TOKEN) headers.authorization = `Bearer ${process.env.TMDB_READ_TOKEN}`;
+  else url.searchParams.set("api_key", process.env.TMDB_API_KEY!);
+  for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
+  try {
+    const res = await fetch(url, { headers, next: { revalidate: DAY } });
+    if (!res.ok) {
+      console.warn(`[tmdb] ${pathname} -> ${res.status}`);
+      return null;
+    }
+    return (await res.json()) as T;
+  } catch (err) {
+    console.warn(`[tmdb] ${pathname} failed:`, err instanceof Error ? err.message : err);
+    return null;
+  }
+}
+
+type RawMovie = {
+  poster_path: string | null;
+  overview: string | null;
+  tagline: string | null;
+  runtime: number | null;
+  credits?: { cast?: { id: number; name: string; character: string | null; profile_path: string | null; order?: number }[] };
+};
+
+export async function getTmdbMovie(tmdbId: number): Promise<TmdbMovie | null> {
+  const raw = await tmdbGet<RawMovie>(`/movie/${tmdbId}`, { append_to_response: "credits" });
+  if (!raw) return null;
+  const cast: CastMember[] = (raw.credits?.cast ?? [])
+    .slice()
+    .sort((a, b) => (a.order ?? 99) - (b.order ?? 99))
+    .slice(0, 10)
+    .map((c) => ({ id: c.id, name: c.name, character: c.character || null, profilePath: c.profile_path }));
+  return {
+    posterPath: raw.poster_path,
+    overview: raw.overview || null,
+    tagline: raw.tagline || null,
+    runtime: raw.runtime || null,
+    cast,
+  };
+}
+
+type RawCredits = { cast?: { id: number; media_type?: string; character?: string; vote_count?: number }[] };
+
+/** TMDB ids of movies a person acted in, most-voted first. */
+export async function getPersonMovieIds(personId: number): Promise<number[] | null> {
+  const raw = await tmdbGet<RawCredits>(`/person/${personId}/combined_credits`);
+  if (!raw) return null;
+  return (raw.cast ?? [])
+    .filter((c) => c.media_type === "movie")
+    .sort((a, b) => (b.vote_count ?? 0) - (a.vote_count ?? 0))
+    .map((c) => c.id);
+}
+</file>
+
+<file path="src/lib/when.ts">
+import { MONTHS } from "./seasons";
+import type { Movie, When } from "./types";
+
+/**
+ * "When should I watch this?"  v0.
+ *
+ * Priority:
+ *  1. learned  - the movie passed the recurrence check in explore_ratings.py
+ *                (peak month repeats across several different years)
+ *  2. tags     - tagged/titled as a Christmas or Halloween movie
+ *  3. genre    - horror leans October
+ *  4. none     - no evidence of seasonality; we say so instead of guessing
+ *
+ * The multipliers in the reasons come from the ml-32m run of explore_ratings.py
+ * (bulk days removed, ratings >= 2 years after release):
+ *   Christmas movies: December share 2.25x   Halloween movies: October 1.70x
+ *   Horror genre: October 1.35x
+ */
+export function computeWhen(m: Pick<Movie, "title" | "genres" | "tags" | "seasonal">): When {
+  if (m.seasonal) {
+    const { peakMonth, peakYears } = m.seasonal;
+    return {
+      peakMonth,
+      source: "learned",
+      strength: "strong",
+      reason: `Ratings for this movie peak in ${MONTHS[peakMonth]}, in ${peakYears} different years.`,
+    };
+  }
+
+  const text = [m.title, ...m.tags.map((t) => t.tag)].join(" ").toLowerCase();
+  if (/\b(christmas|xmas)\b/.test(text)) {
+    return {
+      peakMonth: 11,
+      source: "tags",
+      strength: "strong",
+      reason: "Christmas movies get about twice their usual share of ratings in December.",
+    };
+  }
+  if (/\bhalloween\b/.test(text)) {
+    return {
+      peakMonth: 9,
+      source: "tags",
+      strength: "strong",
+      reason: "Halloween movies get about 1.7 times their usual share of ratings in October.",
+    };
+  }
+  if (m.genres.includes("Horror")) {
+    return {
+      peakMonth: 9,
+      source: "genre",
+      strength: "mild",
+      reason: "Horror gets about 1.35 times its usual share of ratings in October.",
+    };
+  }
+  return {
+    peakMonth: null,
+    source: "none",
+    strength: "none",
+    reason: "No seasonal pattern found for this movie. Timing by runtime and mood comes later.",
+  };
+}
+</file>
+
 <file path=".env.example">
 # Optional. Without a TMDB key the app still works from catalog.db,
 # but you get no posters, plot summaries or cast (so no actor nodes in the mesh).
@@ -1485,40 +1266,6 @@ const nextConfig: NextConfig = {
 export default nextConfig;
 </file>
 
-<file path="package.json">
-{
-  "name": "moviemesh",
-  "version": "0.1.0",
-  "private": true,
-  "scripts": {
-    "dev": "next dev",
-    "build": "next build",
-    "start": "next start",
-    "lint": "eslint"
-  },
-  "dependencies": {
-    "@fontsource-variable/bricolage-grotesque": "^5.3.0",
-    "@fontsource-variable/instrument-sans": "^5.3.0",
-    "@xyflow/react": "^12.12.0",
-    "better-sqlite3": "^13.0.3",
-    "next": "16.3.8",
-    "react": "19.2.8",
-    "react-dom": "19.2.8"
-  },
-  "devDependencies": {
-    "@tailwindcss/postcss": "^4",
-    "@types/better-sqlite3": "^9.6.0",
-    "@types/node": "^20",
-    "@types/react": "^19",
-    "@types/react-dom": "^19",
-    "eslint": "^9",
-    "eslint-config-next": "16.3.8",
-    "tailwindcss": "^4",
-    "typescript": "^5"
-  }
-}
-</file>
-
 <file path="postcss.config.mjs">
 const config = {
   plugins: {
@@ -1527,43 +1274,6 @@ const config = {
 };
 
 export default config;
-</file>
-
-<file path="tsconfig.json">
-{
-  "compilerOptions": {
-    "target": "ES2017",
-    "lib": ["dom", "dom.iterable", "esnext"],
-    "allowJs": true,
-    "skipLibCheck": true,
-    "strict": true,
-    "noEmit": true,
-    "esModuleInterop": true,
-    "module": "esnext",
-    "moduleResolution": "bundler",
-    "resolveJsonModule": true,
-    "isolatedModules": true,
-    "jsx": "react-jsx",
-    "incremental": true,
-    "plugins": [
-      {
-        "name": "next"
-      }
-    ],
-    "paths": {
-      "@/*": ["./src/*"]
-    }
-  },
-  "include": [
-    "next-env.d.ts",
-    "**/*.ts",
-    "**/*.tsx",
-    ".next/types/**/*.ts",
-    ".next/dev/types/**/*.ts",
-    "**/*.mts"
-  ],
-  "exclude": ["node_modules"]
-}
 </file>
 
 <file path="README.md">
@@ -1603,6 +1313,1716 @@ You can check out [the Next.js GitHub repository](https://github.com/vercel/next
 The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
 
 Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+</file>
+
+<file path="tsconfig.json">
+{
+  "compilerOptions": {
+    "target": "ES2017",
+    "lib": ["dom", "dom.iterable", "esnext"],
+    "allowJs": true,
+    "skipLibCheck": true,
+    "strict": true,
+    "noEmit": true,
+    "esModuleInterop": true,
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "jsx": "react-jsx",
+    "incremental": true,
+    "plugins": [
+      {
+        "name": "next"
+      }
+    ],
+    "paths": {
+      "@/*": ["./src/*"]
+    }
+  },
+  "include": [
+    "next-env.d.ts",
+    "**/*.ts",
+    "**/*.tsx",
+    ".next/types/**/*.ts",
+    ".next/dev/types/**/*.ts",
+    "**/*.mts"
+  ],
+  "exclude": ["node_modules"]
+}
+</file>
+
+<file path="data/build_catalog.py">
+"""
+Build catalog.db (SQLite) from MovieLens ml-32m files.
+
+Tables
+  movies(movie_id, title, alt_title, year, genres_raw, imdb_id, tmdb_id, n_ratings, avg_rating)
+  movie_genres(movie_id, genre)
+  movie_tags(movie_id, tag, n_taggers)      -- cleaned: spam user removed, >= MIN_TAGGERS distinct users, top TAGS_PER_MOVIE
+  seasonal_movies(movie_id, peak_month, lift, n, peak_years)   -- only if seasonal_movies.csv exists
+  movies_fts                                -- full-text search over title + alt_title (if SQLite has FTS5)
+
+Usage:  python build_catalog.py [path/to/ml-32m] [--ratings]
+  --ratings   also read ratings.csv to fill n_ratings / avg_rating (slow-ish; adds a popularity signal)
+Output: data/catalog.db if a data/ folder exists in the current folder, otherwise ./catalog.db.
+"""
+import re
+import sqlite3
+import sys
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+SPAM_USER = 78213     # wrote ~36% of all tags
+MIN_TAGGERS = 3       # a tag must come from >= this many distinct users for that movie
+TAGS_PER_MOVIE = 20   # keep the most-agreed-upon tags per movie
+
+args = [a for a in sys.argv[1:] if not a.startswith("--")]
+use_ratings = "--ratings" in sys.argv
+def find_data_root(arg):
+    """Find the folder holding movies.csv. Tries: the path given, ./ml-32m, ./data/ml-32m, ./data."""
+    base = Path(arg) if arg else Path(".")
+    tried = [base, base / "ml-32m", base / "data" / "ml-32m", base / "data"]
+    for c in tried:
+        if (c / "movies.csv").exists():
+            return c
+    sys.exit("Can't find movies.csv. Looked in:\n  " + "\n  ".join(str(t.resolve()) for t in tried)
+             + "\nPass the folder containing the CSVs, e.g.  python build_catalog.py data/ml-32m")
+
+root = find_data_root(args[0] if args else None)
+print(f"Using data in {root.resolve()}")
+for f in ("movies.csv", "links.csv", "tags.csv") + (("ratings.csv",) if use_ratings else ()):
+    if not (root / f).exists():
+        sys.exit(f"Can't find {f} in {root.resolve()}.")
+
+# ---------- movies ----------
+ARTICLE = re.compile(r"^(.*), (The|A|An|Les|La|Le|Los|Las|El|Il|Der|Die|Das|L')$")
+
+
+def split_title(raw):
+    """'City of Lost Children, The (Cité des enfants perdus, La) (1995)' -> ('The City of Lost Children', 'Cité des enfants perdus, La', 1995)"""
+    year = None
+    m = re.search(r"\((\d{4})\)\s*$", raw)
+    if m:
+        year, raw = int(m.group(1)), raw[:m.start()].strip()
+    main, _, alt = raw.partition(" (")
+    a = ARTICLE.match(main)
+    if a:
+        main = f"{a.group(2)}{'' if a.group(2).endswith(chr(39)) else ' '}{a.group(1)}"
+    return main.strip(), alt.rstrip(")").strip() or None, year
+
+
+movies = pd.read_csv(root / "movies.csv")
+parts = movies.title.map(split_title)
+movies["title_clean"] = [p[0] for p in parts]
+movies["alt_title"] = [p[1] for p in parts]
+movies["year"] = [p[2] for p in parts]
+
+links = pd.read_csv(root / "links.csv", dtype={"imdbId": str, "tmdbId": str})  # keep leading zeros on imdbId
+movies = movies.merge(links, on="movieId", how="left")
+movies["imdb_id"] = np.where(movies.imdbId.notna(), "tt" + movies.imdbId.fillna(""), None)
+movies["tmdb_id"] = pd.to_numeric(movies.tmdbId, errors="coerce")
+
+movies["n_ratings"] = None
+movies["avg_rating"] = None
+if use_ratings:
+    n_max = int(movies.movieId.max()) + 1
+    cnt, tot = np.zeros(n_max), np.zeros(n_max)
+    for chunk in pd.read_csv(root / "ratings.csv", usecols=["movieId", "rating"], chunksize=4_000_000):
+        mid = chunk.movieId.values
+        cnt += np.bincount(mid, minlength=n_max)
+        tot += np.bincount(mid, weights=chunk.rating.values, minlength=n_max)
+    c = cnt[movies.movieId.values]
+    movies["n_ratings"] = c.astype(int)
+    movies["avg_rating"] = np.where(c > 0, tot[movies.movieId.values] / np.maximum(c, 1), np.nan).round(3)
+
+genres = (movies[["movieId", "genres"]].assign(genre=movies.genres.str.split("|")).explode("genre")
+          .query("genre != '(no genres listed)'")[["movieId", "genre"]]
+          .rename(columns={"movieId": "movie_id"}))
+
+# ---------- tags ----------
+tags = pd.read_csv(root / "tags.csv", usecols=["userId", "movieId", "tag"])
+n_raw = len(tags)
+tags = tags[tags.userId != SPAM_USER].dropna(subset=["tag"])
+tags["tag"] = tags.tag.str.lower().str.replace(r"\s+", " ", regex=True).str.strip()
+tags = tags[tags.tag != ""]
+agg = (tags.groupby(["movieId", "tag"]).userId.nunique().rename("n_taggers").reset_index()
+       .query("n_taggers >= @MIN_TAGGERS")
+       .sort_values(["movieId", "n_taggers"], ascending=[True, False])
+       .groupby("movieId").head(TAGS_PER_MOVIE)
+       .rename(columns={"movieId": "movie_id"}))
+
+# ---------- write sqlite ----------
+# Write into ./data/ when it exists (that's where the Next.js app looks), otherwise the current folder.
+db_path = (Path.cwd() / "data" if (Path.cwd() / "data").is_dir() else Path.cwd()) / "catalog.db"
+if db_path.exists():
+    db_path.unlink()
+con = sqlite3.connect(db_path)
+con.executescript("""
+CREATE TABLE movies(
+  movie_id INTEGER PRIMARY KEY, title TEXT NOT NULL, alt_title TEXT, year INTEGER,
+  genres_raw TEXT, imdb_id TEXT, tmdb_id INTEGER, n_ratings INTEGER, avg_rating REAL);
+CREATE TABLE movie_genres(movie_id INTEGER NOT NULL, genre TEXT NOT NULL);
+CREATE TABLE movie_tags(movie_id INTEGER NOT NULL, tag TEXT NOT NULL, n_taggers INTEGER NOT NULL);
+""")
+
+
+def obj(df):  # NaN/NA -> None so sqlite stores NULL
+    return df.astype(object).where(df.notna(), None)
+
+
+m_out = obj(movies[["movieId", "title_clean", "alt_title", "year", "genres", "imdb_id", "tmdb_id",
+                    "n_ratings", "avg_rating"]])
+m_out["year"] = m_out.year.map(lambda v: None if v is None else int(v))
+m_out["tmdb_id"] = m_out.tmdb_id.map(lambda v: None if v is None else int(v))
+con.executemany("INSERT INTO movies VALUES (?,?,?,?,?,?,?,?,?)", m_out.itertuples(index=False, name=None))
+genres.to_sql("movie_genres", con, if_exists="append", index=False)
+agg.to_sql("movie_tags", con, if_exists="append", index=False)
+con.executescript("""
+CREATE INDEX idx_genres_movie ON movie_genres(movie_id);
+CREATE INDEX idx_genres_genre ON movie_genres(genre);
+CREATE INDEX idx_tags_movie ON movie_tags(movie_id);
+CREATE INDEX idx_tags_tag ON movie_tags(tag);
+CREATE INDEX idx_movies_tmdb ON movies(tmdb_id);
+CREATE INDEX idx_movies_year ON movies(year);
+""")
+
+# explore_ratings.py writes seasonal_movies.csv next to where catalog.db goes; also accept the current folder.
+seasonal_csv = next((c for c in (db_path.parent / "seasonal_movies.csv", Path.cwd() / "seasonal_movies.csv") if c.exists()),
+                    db_path.parent / "seasonal_movies.csv")
+if seasonal_csv.exists():
+    s = pd.read_csv(seasonal_csv).rename(columns={"movieId": "movie_id"})
+    con.execute("CREATE TABLE seasonal_movies(movie_id INTEGER PRIMARY KEY, peak_month TEXT, lift REAL, n INTEGER, peak_years INTEGER)")
+    s[["movie_id", "peak_month", "lift", "n", "peak_years"]].to_sql("seasonal_movies", con, if_exists="append", index=False)
+
+fts = True
+try:
+    con.execute("CREATE VIRTUAL TABLE movies_fts USING fts5(title, alt_title, content='movies', content_rowid='movie_id')")
+    con.execute("INSERT INTO movies_fts(rowid, title, alt_title) SELECT movie_id, title, COALESCE(alt_title,'') FROM movies")
+except sqlite3.OperationalError:
+    fts = False
+con.commit()
+
+# ---------- report ----------
+q = lambda sql: con.execute(sql).fetchall()
+print(f"Wrote {db_path} ({db_path.stat().st_size/1e6:.1f} MB)")
+print(f"movies: {q('SELECT COUNT(*) FROM movies')[0][0]:,}")
+print(f"  no year: {q('SELECT COUNT(*) FROM movies WHERE year IS NULL')[0][0]:,} | "
+      f"no tmdb id: {q('SELECT COUNT(*) FROM movies WHERE tmdb_id IS NULL')[0][0]:,} | "
+      f"no genres: {q('SELECT COUNT(*) FROM movies WHERE movie_id NOT IN (SELECT movie_id FROM movie_genres)')[0][0]:,}")
+print(f"tags: {n_raw:,} raw rows -> {len(agg):,} kept (spam user removed, >= {MIN_TAGGERS} taggers, top {TAGS_PER_MOVIE}/movie)")
+print(f"  movies with >=1 tag: {agg.movie_id.nunique():,} | distinct tags kept: {agg.tag.nunique():,}")
+print(f"  no genres but has tags (tags can fill the gap): "
+      f"{q('SELECT COUNT(*) FROM movies WHERE movie_id NOT IN (SELECT movie_id FROM movie_genres) AND movie_id IN (SELECT movie_id FROM movie_tags)')[0][0]:,}")
+print("  most common tags:", ", ".join(f"{t} ({n})" for t, n in q("SELECT tag, COUNT(*) c FROM movie_tags GROUP BY tag ORDER BY c DESC LIMIT 25")))
+print("full-text search:", "yes" if fts else "no (this SQLite build lacks FTS5)")
+if seasonal_csv.exists():
+    print(f"seasonal_movies: {q('SELECT COUNT(*) FROM seasonal_movies')[0][0]:,}")
+print("sample:", q("SELECT movie_id, title, alt_title, year, tmdb_id FROM movies WHERE movie_id IN (1, 2, 11, 3114, 112556)"))
+</file>
+
+<file path="data/explore_ratings.py">
+"""
+Does ratings.csv contain a real "when" signal?  (v2)
+
+New in v2:
+  0. Threshold sensitivity: how do the results change if "bulk day" means >5, >15, >30, >100 ratings/day?
+  3. Recurrence check: a movie only counts as seasonal if its peak month repeats across
+     several different YEARS (filters out one-time bursts like a few users rating one movie in May 2015).
+  Exports seasonal_movies.csv (the movies that pass) to ./data/ if it exists, otherwise the current folder.
+
+Cleaning used for all tables (at the MAIN threshold):
+  - drops "bulk days" (user rating > MAIN movies in one day = backfilling, not watching)
+  - keeps only ratings made >= MIN_AGE_YEARS after release, so new releases don't look "seasonal"
+
+Usage:  python explore_ratings.py [path/to/ml-32m]
+"""
+import sys
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+THRESHOLDS = [5, 15, 30, 100]   # bulk-day thresholds to compare
+MAIN = 15                       # threshold used for sections 1-3 (must be in THRESHOLDS)
+MIN_AGE_YEARS = 2
+MIN_RATINGS_PER_MOVIE = 300     # section 3: movies with fewer clean ratings are skipped
+MIN_GROUP_RATINGS = 2000        # sections 1-2: skip groups with fewer ratings
+MIN_LIFT = 2.0                  # "recurring" needs peak-month lift >= this ...
+MIN_PEAK_YEARS = 4              # ... in at least this many different years (>= 3 ratings each) ...
+MIN_RATINGS_PER_PEAK_YEAR = 3
+MAX_TOP_YEAR_SHARE = 0.35       # ... and no single year may hold more than this share of peak-month ratings
+
+def find_data_root(arg):
+    """Find the folder holding movies.csv. Tries: the path given, ./ml-32m, ./data/ml-32m, ./data."""
+    base = Path(arg) if arg else Path(".")
+    tried = [base, base / "ml-32m", base / "data" / "ml-32m", base / "data"]
+    for c in tried:
+        if (c / "movies.csv").exists():
+            return c
+    sys.exit("Can't find movies.csv. Looked in:\n  " + "\n  ".join(str(t.resolve()) for t in tried)
+             + "\nPass the folder containing the CSVs, e.g.  python explore_ratings.py data/ml-32m")
+
+root = find_data_root(sys.argv[1] if len(sys.argv) > 1 else None)
+print(f"Using data in {root.resolve()}")
+
+movies = pd.read_csv(root / "movies.csv")
+movies["year"] = movies.title.str.extract(r"\((\d{4})\)\s*$")[0].astype(float)
+N = int(movies.movieId.max()) + 1
+year_of = np.full(N, np.nan)
+year_of[movies.movieId.values] = movies.year.values
+title_of = movies.set_index("movieId").title
+
+tags = pd.read_csv(root / "tags.csv", usecols=["userId", "movieId", "tag"])
+tags = tags[tags.userId != 78213]  # one user wrote ~36% of all tags
+
+KEYWORDS = {
+    "christmas": r"\bchristmas\b|\bxmas\b",
+    "halloween": r"\bhalloween\b",
+    "valentine": r"\bvalentine",
+    "thanksgiving": r"\bthanksgiving\b",
+    "new year": r"\bnew year",
+    "summer": r"\bsummer\b",
+    "winter": r"\bwinter\b",
+    "beach": r"\bbeach\b",
+    "snow": r"\bsnow\b",
+    "spring": r"\bspring\b",
+}
+
+
+def ids_for(pattern):
+    by_title = movies.loc[movies.title.str.contains(pattern, case=False, regex=True), "movieId"]
+    t = tags.loc[tags.tag.str.contains(pattern, case=False, regex=True, na=False), "movieId"]
+    c = t.value_counts()
+    return set(by_title) | set(c[c >= 3].index)  # tag must come from >= 3 taggers
+
+
+kw_ids = {name: ids_for(p) for name, p in KEYWORDS.items()}
+genre_ids = {g: set(grp.movieId) for g, grp in
+             movies.assign(genre=movies.genres.str.split("|")).explode("genre").groupby("genre")
+             if g != "(no genres listed)"}
+
+# ---- one pass over ratings ----
+mms = {t: np.zeros(N * 12, dtype=np.int64) for t in THRESHOLDS}   # movie x month counts per threshold
+kept = {t: 0 for t in THRESHOLDS}
+rows = []                                                          # (movieId, year, month0) at MAIN threshold
+hour, dow = np.zeros(24), np.zeros(7)
+total = 0
+
+for chunk in pd.read_csv(root / "ratings.csv", chunksize=2_000_000):
+    dt = pd.to_datetime(chunk.timestamp, unit="s")
+    total += len(chunk)
+    size = chunk.groupby(["userId", dt.dt.floor("D")])["movieId"].transform("size").values
+    mid = chunk.movieId.values
+    yr = dt.dt.year.values
+    month = dt.dt.month.values - 1
+    ok_age = (yr - year_of[mid]) >= MIN_AGE_YEARS  # unknown release year -> NaN -> False -> dropped
+    for t in THRESHOLDS:
+        keep = (size <= t) & ok_age
+        kept[t] += int(keep.sum())
+        mms[t] += np.bincount(mid[keep] * 12 + month[keep], minlength=N * 12)
+        if t == MAIN:
+            rows.append(np.stack([mid[keep], yr[keep], month[keep]], 1).astype(np.int32))
+            hour += np.bincount(dt.dt.hour.values[keep], minlength=24)
+            dow += np.bincount(dt.dt.dayofweek.values[keep], minlength=7)
+
+mats = {t: m.reshape(N, 12) for t, m in mms.items()}
+M = "Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec".split()
+
+
+def group_lift(mat, ids):
+    ids = np.array(sorted(i for i in ids if i < N))
+    c = mat[ids].sum(0)
+    if c.sum() == 0:
+        return np.full(12, np.nan), 0
+    return c / c.sum() / (mat.sum(0) / mat.sum()), int(c.sum())
+
+
+print(f"{total:,} ratings read.\n")
+print("== 0. Sensitivity to the bulk-day threshold")
+print("   (does a stricter/looser definition of 'bulk day' change the conclusions?)")
+print(f"{'bulk if >':>10} {'kept':>12} {'%':>5} {'movies>=300':>12} {'xmas Dec':>9} {'hallo Oct':>10} {'horror Oct':>11}")
+for t in THRESHOLDS:
+    mat = mats[t]
+    n_m = mat.sum(1)
+    xm = group_lift(mat, kw_ids["christmas"])[0][11]
+    hw = group_lift(mat, kw_ids["halloween"])[0][9]
+    hr = group_lift(mat, genre_ids["Horror"])[0][9]
+    star = "  <- used below" if t == MAIN else ""
+    print(f"{t:>10} {kept[t]:>12,} {kept[t]/total:>5.0%} {(n_m >= MIN_RATINGS_PER_MOVIE).sum():>12,} "
+          f"{xm:>9.2f} {hw:>10.2f} {hr:>11.2f}{star}")
+
+mm = mats[MAIN]
+base = mm.sum(0) / mm.sum()
+header = " " * 16 + " ".join(f"{m:>5}" for m in M) + "   n"
+
+
+def lift_row(label, ids):
+    lift, n = group_lift(mm, ids)
+    if n < MIN_GROUP_RATINGS:
+        return None
+    return f"{label:>15} " + " ".join(f"{x:5.2f}" for x in lift) + f" {n:>8,}  peak {M[int(np.nanargmax(lift))]}"
+
+
+print(f"\n== 1. Keyword seasons at bulk threshold {MAIN} (lift 1.0 = no seasonality)")
+print(header)
+for name, ids in kw_ids.items():
+    print(lift_row(f"{name} ({len(ids)})", ids) or f"{name:>15} ({len(ids)} movies) too few ratings")
+
+print("\n== 2. By genre")
+print(header)
+for genre, ids in genre_ids.items():
+    row = lift_row(genre, ids)
+    if row:
+        print(row)
+
+# ---- section 3: individual movies, with recurrence check ----
+print(f"\n== 3. Individual movies: seasonal AND recurring (>= {MIN_RATINGS_PER_MOVIE} clean ratings)")
+n_m = mm.sum(1)
+cand = np.where(n_m >= MIN_RATINGS_PER_MOVIE)[0]
+if len(cand) == 0:
+    sys.exit("No movie has enough clean ratings for section 3 (is this a sample of ratings.csv?)")
+exp = np.outer(n_m[cand], base)
+effect = ((mm[cand] - exp) ** 2 / exp).sum(1) / n_m[cand]      # how uneven across months
+lift_m = mm[cand] / n_m[cand][:, None] / base
+peak, peak_lift = lift_m.argmax(1), lift_m.max(1)
+
+df = pd.DataFrame(np.concatenate(rows), columns=["movieId", "year", "month"])
+df = df[df.movieId.isin(cand)]
+df["peak"] = df.movieId.map(pd.Series(peak, index=cand))
+per_year = (df[df.month == df.peak].groupby(["movieId", "year"]).size().rename("c").reset_index())
+agg = per_year.groupby("movieId").c.agg(
+    peak_years=lambda x: int((x >= MIN_RATINGS_PER_PEAK_YEAR).sum()),
+    top_year_share=lambda x: x.max() / x.sum())
+
+res = pd.DataFrame({"movieId": cand, "title": [title_of.get(i, str(i)) for i in cand], "n": n_m[cand],
+                    "effect": effect, "peak_month": [M[p] for p in peak], "lift": peak_lift}).set_index("movieId")
+res = res.join(agg).fillna({"peak_years": 0, "top_year_share": 1.0})
+seasonal_enough = res.lift >= MIN_LIFT
+recurring = seasonal_enough & (res.peak_years >= MIN_PEAK_YEARS) & (res.top_year_share <= MAX_TOP_YEAR_SHARE)
+res["verdict"] = np.where(recurring, "RECURRING", np.where(seasonal_enough, "burst?", "weak"))
+
+print(f"Of {len(res):,} candidate movies: {int(recurring.sum())} RECURRING, "
+      f"{int((seasonal_enough & ~recurring).sum())} 'burst?' (high lift but not repeating across years), "
+      f"{int((~seasonal_enough).sum())} weak/none.")
+print(f"(median effect = {res.effect.median():.3f}: the noise floor)")
+print("\nRecurrence needs: lift >= %.1f, >= %d years with >= %d peak-month ratings, no year > %d%% of peak-month ratings."
+      % (MIN_LIFT, MIN_PEAK_YEARS, MIN_RATINGS_PER_PEAK_YEAR, MAX_TOP_YEAR_SHARE * 100))
+
+
+def show(frame, k=30):
+    print(f"{'effect':>7} {'n':>6} {'peak':>5} {'lift':>5} {'yrs':>4} {'topyr%':>7}  {'verdict':<9} title")
+    for _, r in frame.head(k).iterrows():
+        print(f"{r.effect:7.2f} {r.n:6,.0f} {r.peak_month:>5} {r.lift:5.2f} {r.peak_years:4.0f} "
+              f"{r.top_year_share:7.0%}  {r.verdict:<9} {r.title}")
+
+
+top = res.sort_values("effect", ascending=False)
+print("\n-- Top 30 by effect size, with verdicts (this is where Body Snatchers etc. should show as 'burst?')")
+show(top)
+print("\n-- Top 30 RECURRING movies (these are the trustworthy seasonal ones)")
+show(top[top.verdict == "RECURRING"])
+print("\n-- Recurring movies by peak month")
+print(top[top.verdict == "RECURRING"].peak_month.value_counts().reindex(M).fillna(0).astype(int).to_dict())
+
+# Same place build_catalog.py writes catalog.db: ./data/ if it exists, otherwise the current folder.
+out = (Path.cwd() / "data" if (Path.cwd() / "data").is_dir() else Path.cwd()) / "seasonal_movies.csv"
+top[top.verdict == "RECURRING"].reset_index()[
+    ["movieId", "title", "peak_month", "lift", "n", "peak_years", "top_year_share"]].to_csv(out, index=False)
+print(f"\nWrote {out}")
+
+print("\nHour-of-day share (UTC):", np.round(hour / hour.sum(), 3).tolist())
+print("Day-of-week share (Mon..Sun, UTC):", np.round(dow / dow.sum(), 3).tolist())
+</file>
+
+<file path="src/components/Explorer.tsx">
+/* eslint-disable @next/next/no-img-element */
+"use client";
+
+import { useCallback, useMemo, useRef, useState } from "react";
+import { imageUrl } from "@/lib/images";
+import { useLibrary } from "@/lib/library";
+import { featuresOf, scoreMovie } from "@/lib/score";
+import { MONTHS } from "@/lib/seasons";
+import type { MeshMovieData, MeshNodeData, MeshPersonData, MovieDetail, Starter, TmdbStatus } from "@/lib/types";
+import { GradeLegend } from "./GradeLegend";
+import { LibraryPanel } from "./LibraryPanel";
+import { MeshCanvas, type Focus } from "./MeshCanvas";
+import { MoviePanel } from "./MoviePanel";
+import { SearchBox } from "./SearchBox";
+
+type Selection =
+  | { kind: "movie"; id: number; detail: MovieDetail | null; via: string | null; error?: string }
+  | { kind: "person"; data: MeshPersonData }
+  | null;
+
+const rootFrom = (d: MovieDetail): MeshMovieData => ({
+  ...featuresOf(d.movie, d.when),
+  kind: "movie",
+  tmdbId: d.movie.tmdbId,
+  posterPath: d.tmdb?.posterPath ?? null,
+  via: null,
+});
+
+async function fetchDetail(id: number): Promise<MovieDetail> {
+  const res = await fetch(`/api/movie/${id}`);
+  const body = await res.json();
+  if (!res.ok) throw new Error(body.error ?? "Couldn't load that movie.");
+  return body as MovieDetail;
+}
+
+export function Explorer({ starters, initial }: { starters: Starter[]; initial: MovieDetail | null }) {
+  // `initial` is loaded on the server when the URL has ?m=<id>, so the first paint already has the mesh root.
+  const [root, setRoot] = useState<MeshMovieData | null>(() => (initial ? rootFrom(initial) : null));
+  const [selection, setSelection] = useState<Selection>(() =>
+    initial ? { kind: "movie", id: initial.movie.id, detail: initial, via: null } : null,
+  );
+  const [focus, setFocus] = useState<Focus | null>(null);
+  const focusNonce = useRef(0);
+  const [view, setView] = useState<"details" | "list">("details");
+  const [notice, setNotice] = useState<string | null>(null);
+  const [tmdb, setTmdb] = useState<TmdbStatus | null>(null);
+  const now = useMemo(() => new Date(), []);
+  const lib = useLibrary();
+  const entries = Object.values(lib);
+  const watchedCount = entries.filter((e) => e.status === "watched").length;
+  const plannedCount = entries.length - watchedCount;
+  const cache = useRef(new Map<number, MovieDetail>(initial ? [[initial.movie.id, initial]] : []));
+
+  const loadDetail = useCallback(async (id: number) => {
+    const hit = cache.current.get(id);
+    if (hit) return hit;
+    const d = await fetchDetail(id);
+    cache.current.set(id, d);
+    return d;
+  }, []);
+
+  const choose = useCallback(
+    async (id: number) => {
+      setNotice(null);
+      setView("details");
+      setFocus(null); // a fresh mesh must not replay an old "reveal this movie" request
+      try {
+        const d = await loadDetail(id);
+        setSelection({ kind: "movie", id, detail: d, via: null });
+        setRoot(rootFrom(d));
+        window.history.replaceState(null, "", `/?m=${id}`);
+      } catch (e) {
+        setNotice(e instanceof Error ? e.message : "Couldn't load that movie.");
+      }
+    },
+    [loadDetail],
+  );
+
+  /** From My list: zoom to the movie if it's on the mesh, otherwise add it (linked if it relates to anything). */
+  const openFromList = useCallback(
+    async (id: number) => {
+      if (!root) return choose(id);
+      setNotice(null);
+      setView("details");
+      try {
+        const d = await loadDetail(id);
+        setFocus({
+          data: { ...rootFrom(d), via: "From your list" },
+          castIds: d.tmdb?.cast.map((c) => c.id) ?? [],
+          nonce: ++focusNonce.current,
+        });
+      } catch (e) {
+        setNotice(e instanceof Error ? e.message : "Couldn't load that movie.");
+      }
+    },
+    [choose, loadDetail, root],
+  );
+
+  const onSelect = useCallback(
+    async (data: MeshNodeData) => {
+      setView("details");
+      if (data.kind === "person") {
+        setSelection({ kind: "person", data });
+        return;
+      }
+      const id = data.movieId;
+      setSelection({ kind: "movie", id, detail: cache.current.get(id) ?? null, via: data.via });
+      try {
+        const d = await loadDetail(id);
+        setSelection((s) => (s?.kind === "movie" && s.id === id ? { ...s, detail: d } : s));
+      } catch (e) {
+        const error = e instanceof Error ? e.message : "Couldn't load that movie.";
+        setSelection((s) => (s?.kind === "movie" && s.id === id ? { ...s, error } : s));
+      }
+    },
+    [loadDetail],
+  );
+
+  const tmdbNote =
+    tmdb === "disabled"
+      ? "Add a TMDB key to see posters and actors in the mesh. See the README."
+      : tmdb === "unavailable"
+        ? "TMDB didn't respond, so posters and actors are hidden for now."
+        : null;
+
+  return (
+    <div className="flex min-h-dvh flex-col lg:h-dvh">
+      <header className="flex flex-wrap items-center gap-x-6 gap-y-2 border-b border-line bg-surface px-4 py-3">
+        <h1 className="font-display text-xl font-semibold">MovieMesh</h1>
+        <SearchBox onChoose={choose} />
+        <div className="ml-auto flex items-center gap-4">
+          <button
+            type="button"
+            aria-pressed={view === "list"}
+            onClick={() => setView((v) => (v === "list" ? "details" : "list"))}
+            className={`rounded-full border px-3 py-1.5 text-sm ${
+              view === "list" ? "border-ink bg-ink text-surface" : "border-line hover:border-line-strong"
+            }`}
+          >
+            My list
+            <span className="ml-1.5 opacity-70" suppressHydrationWarning>
+              {watchedCount}✓ · {plannedCount}+
+            </span>
+          </button>
+          <p className="text-sm text-muted" suppressHydrationWarning>
+            It&apos;s {MONTHS[now.getMonth()]}
+          </p>
+        </div>
+      </header>
+
+      <div className="flex flex-1 flex-col lg:grid lg:min-h-0 lg:grid-cols-[minmax(0,1fr)_400px]">
+        <section aria-label="Movie mesh" className="relative h-[62dvh] border-b border-line lg:h-auto lg:border-b-0 lg:border-r">
+          {root ? (
+            <MeshCanvas key={root.movieId} root={root} focus={focus} onSelect={onSelect} onTmdb={setTmdb} onError={setNotice} />
+          ) : (
+            <div className="grid h-full place-items-center p-6">
+              <div className="max-w-md">
+                <h2 className="font-display text-3xl font-semibold leading-tight">Pick a movie to start your mesh</h2>
+                <p className="mt-3 text-muted">
+                  Each movie links to similar ones. Click any node to grow the mesh from it.
+                </p>
+                <ul className="mt-5 flex flex-wrap gap-2">
+                  {starters.map((s) => (
+                    <li key={s.id}>
+                      <button
+                        type="button"
+                        onClick={() => void choose(s.id)}
+                        className="flex items-center gap-2 rounded-full border border-line bg-surface px-3 py-1.5 text-sm hover:border-line-strong"
+                      >
+                        <span
+                          aria-hidden
+                          className="h-2.5 w-2.5 rounded-full"
+                          style={{ background: scoreMovie(s, lib, now).tier.color }}
+                        />
+                        {s.title} ({s.year})
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            </div>
+          )}
+
+          <div className="pointer-events-none absolute left-3 top-3 z-10 flex max-w-sm flex-col gap-2" role="status">
+            {notice && (
+              <p className="pointer-events-auto rounded-md border border-line bg-surface px-3 py-2 text-sm shadow">{notice}</p>
+            )}
+            {!notice && tmdbNote && (
+              <p className="rounded-md border border-line bg-surface px-3 py-2 text-sm text-muted shadow">{tmdbNote}</p>
+            )}
+          </div>
+
+          {root && <GradeLegend />}
+        </section>
+
+        <aside aria-label={view === "list" ? "My list" : "Details"} className="overflow-y-auto bg-surface p-5 lg:min-h-0">
+          {view === "list" && <LibraryPanel onOpen={(id) => void openFromList(id)} />}
+          {view === "details" && (
+            <>
+          {selection?.kind === "movie" && selection.detail && (
+            <MoviePanel key={selection.id} detail={selection.detail} now={now} via={selection.via} showTmdbNote={false} />
+          )}
+          {selection?.kind === "movie" && !selection.detail && !selection.error && (
+            <p className="text-sm text-muted">Loading movie...</p>
+          )}
+          {selection?.kind === "movie" && selection.error && <p className="text-sm">{selection.error}</p>}
+          {selection?.kind === "person" && (
+            <div className="flex items-center gap-4">
+              {imageUrl(selection.data.profilePath, "w185") ? (
+                <img src={imageUrl(selection.data.profilePath, "w185")!} alt="" className="h-24 w-24 rounded-full object-cover" />
+              ) : (
+                <div aria-hidden className="grid h-24 w-24 place-items-center rounded-full bg-ground font-display text-3xl">
+                  {selection.data.name.slice(0, 1)}
+                </div>
+              )}
+              <div>
+                <h2 className="font-display text-2xl font-semibold">{selection.data.name}</h2>
+                {selection.data.character && <p className="text-sm text-muted">as {selection.data.character}</p>}
+                {selection.data.via && <p className="mt-1 text-sm text-muted">{selection.data.via}</p>}
+                <p className="mt-3 text-sm">Their other films in the catalog branch out from this node.</p>
+              </div>
+            </div>
+          )}
+          {!selection && (
+            <p className="max-w-prose text-sm text-muted">
+              Select a movie in the mesh to see its watch score and why, what people tag it, and who&apos;s in it.
+            </p>
+          )}
+            </>
+          )}
+        </aside>
+      </div>
+    </div>
+  );
+}
+</file>
+
+<file path="src/components/GradeLegend.tsx">
+"use client";
+
+import { useState } from "react";
+import { TIERS, TIER_CUTOFFS } from "@/lib/score";
+
+const rows = [
+  { tier: TIERS.now, range: `${TIER_CUTOFFS.now}+` },
+  { tier: TIERS.good, range: `${TIER_CUTOFFS.good}-${TIER_CUTOFFS.now - 1}` },
+  { tier: TIERS.maybe, range: `${TIER_CUTOFFS.maybe}-${TIER_CUTOFFS.good - 1}` },
+  { tier: TIERS.low, range: `under ${TIER_CUTOFFS.maybe}` },
+];
+
+/** Collapsible key for the rim colours, pinned to the bottom-left of the canvas. */
+export function GradeLegend() {
+  const [open, setOpen] = useState(true);
+  return (
+    <div className="absolute bottom-3 left-14 z-10 hidden sm:block">
+      <div className={`${open ? "w-80" : "w-max"} rounded-md border border-line bg-surface/95 p-3`}>
+        <button
+          type="button"
+          aria-expanded={open}
+          onClick={() => setOpen((o) => !o)}
+          className="flex w-full items-center justify-between gap-2 text-left text-xs font-medium"
+        >
+          <span className="flex items-center gap-1">
+            {!open && rows.map(({ tier }) => (
+              <span key={tier.id} aria-hidden className="h-2.5 w-2.5 rounded-[3px]" style={{ background: tier.color }} />
+            ))}
+            <span className={open ? "" : "ml-1"}>Watch score key</span>
+          </span>
+          <span aria-hidden className="text-muted">{open ? "▾ Hide" : "▸ Show"}</span>
+        </button>
+        {open && (
+          <>
+            <ul className="mt-3 grid grid-cols-2 gap-x-3 gap-y-1.5 text-xs">
+              {rows.map(({ tier, range }) => (
+                <li key={tier.id} className="flex items-center gap-1.5 whitespace-nowrap">
+                  <span aria-hidden className="h-3 w-3 shrink-0 rounded-[3px]" style={{ background: tier.color }} />
+                  <span className="font-medium">{tier.label}</span>
+                  <span className="text-muted">{range}</span>
+                </li>
+              ))}
+            </ul>
+            <p className="mt-2 text-xs text-muted">
+              Rim = watch score right now, from season, your taste, and ratings. Watched movies are scored too, for rewatching. ✓ watched, + planned.
+            </p>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+</file>
+
+<file path="src/lib/detail.ts">
+import { getMovie, getStarters } from "./catalog";
+import { featuresOf } from "./score";
+import { getTmdbMovie, tmdbEnabled } from "./tmdb";
+import type { MovieDetail, Starter } from "./types";
+import { computeWhen } from "./when";
+
+/** Everything the UI needs about one movie. Server-only (reads the catalog, may call TMDB). */
+export async function loadMovieDetail(id: number): Promise<MovieDetail | null> {
+  const movie = getMovie(id);
+  if (!movie) return null;
+  const tmdb = movie.tmdbId ? await getTmdbMovie(movie.tmdbId) : null;
+  return {
+    movie,
+    when: computeWhen(movie),
+    tmdb,
+    tmdbStatus: !tmdbEnabled() ? "disabled" : tmdb ? "ok" : "unavailable",
+  };
+}
+
+/** Quick-start movies for the empty state, each carrying what the watch score needs. */
+export function loadStarters(): Starter[] {
+  return getStarters().flatMap((s) => {
+    const full = getMovie(s.id);
+    return full ? [{ id: s.id, ...featuresOf(full, computeWhen(full)) }] : [];
+  });
+}
+</file>
+
+<file path="src/lib/mesh.ts">
+import { getMovie, getMoviesByTmdbIds, getSimilar } from "./catalog";
+import { getPersonMovieIds, getTmdbMovie, tmdbEnabled } from "./tmdb";
+import { featuresOf } from "./score";
+import { computeWhen } from "./when";
+import type { ExpandResponse, MeshMovieData, MovieSummary } from "./types";
+
+type MovieNode = { id: string } & MeshMovieData;
+
+async function movieNode(s: MovieSummary, via: string | null): Promise<MovieNode> {
+  const full = getMovie(s.id);
+  const when = full ? computeWhen(full) : { peakMonth: null, strength: "none" as const, source: "none" as const };
+  // Everything the watch score needs rides along on the node, so the client can re-score
+  // instantly when the library changes (no refetch).
+  const features = featuresOf(
+    full ?? { id: s.id, title: s.title, year: s.year, genres: s.genres, tags: [], avgRating: null, nRatings: null },
+    when,
+  );
+  const tmdb = s.tmdbId ? await getTmdbMovie(s.tmdbId) : null;
+  return {
+    ...features,
+    id: `m:${s.id}`,
+    kind: "movie",
+    tmdbId: s.tmdbId,
+    posterPath: tmdb?.posterPath ?? null,
+    via,
+  };
+}
+
+/** Clicking a movie: similar movies (from the catalog) + top cast (from TMDB, if configured). */
+export async function expandMovie(id: number): Promise<ExpandResponse | null> {
+  const movie = getMovie(id);
+  if (!movie) return null;
+  const similar = getSimilar(id, 6);
+  const [simNodes, tmdb] = await Promise.all([
+    Promise.all(similar.map((s) => movieNode(s.movie, s.via))),
+    movie.tmdbId ? getTmdbMovie(movie.tmdbId) : Promise.resolve(null),
+  ]);
+
+  const source = `m:${id}`;
+  const nodes: ExpandResponse["nodes"] = [...simNodes];
+  const edges: ExpandResponse["edges"] = similar.map((s) => ({
+    source,
+    target: `m:${s.movie.id}`,
+    via: s.via,
+  }));
+  for (const c of tmdb?.cast.slice(0, 5) ?? []) {
+    nodes.push({
+      id: `p:${c.id}`,
+      kind: "person",
+      personId: c.id,
+      name: c.name,
+      character: c.character,
+      profilePath: c.profilePath,
+      via: `Cast of ${movie.title}`,
+    });
+    edges.push({ source, target: `p:${c.id}`, via: "cast" });
+  }
+  return { nodes, edges, tmdb: !tmdbEnabled() ? "disabled" : tmdb ? "ok" : "unavailable" };
+}
+
+/** Clicking an actor: their films that exist in the catalog (joined on tmdb_id). */
+export async function expandPerson(personId: number, name: string): Promise<ExpandResponse> {
+  if (!tmdbEnabled()) return { nodes: [], edges: [], tmdb: "disabled" };
+  const tmdbIds = await getPersonMovieIds(personId);
+  if (!tmdbIds) return { nodes: [], edges: [], tmdb: "unavailable" };
+  const found = getMoviesByTmdbIds(tmdbIds.slice(0, 80)).slice(0, 6);
+  const nodes = await Promise.all(found.map((f) => movieNode(f, `${name} acted in this`)));
+  return {
+    nodes,
+    edges: found.map((f) => ({ source: `p:${personId}`, target: `m:${f.id}`, via: "acted in" })),
+    tmdb: "ok",
+  };
+}
+</file>
+
+<file path="src/lib/score.ts">
+// The watch score: one number (0-100) per movie, blended from several signals.
+// Pure and client/server safe. Each signal returns a Factor that carries its own
+// human-readable reason, so "why is this recommended" can never disagree with the score.
+
+import { MONTHS, monthsUntil } from "./seasons";
+import type { Library, LibraryEntry, Movie, MovieFeatures, When } from "./types";
+
+// ---------- tiers (the rim colour) ----------
+export type TierId = "now" | "good" | "maybe" | "low" | "unknown";
+export type Tier = { id: TierId; label: string; color: string; dashed?: boolean };
+
+export const TIERS: Record<TierId, Tier> = {
+  now: { id: "now", label: "Watch now", color: "#2FA66A" },
+  good: { id: "good", label: "Good fit", color: "#8CBF3F" },
+  maybe: { id: "maybe", label: "Maybe later", color: "#E3A008" },
+  low: { id: "low", label: "Not now", color: "#8089A3" },
+  unknown: { id: "unknown", label: "No signal yet", color: "#8089A3", dashed: true },
+};
+
+export const TIER_CUTOFFS = { now: 75, good: 60, maybe: 45 };
+
+export function tierFor(score: number): Tier {
+  if (score >= TIER_CUTOFFS.now) return TIERS.now;
+  if (score >= TIER_CUTOFFS.good) return TIERS.good;
+  if (score >= TIER_CUTOFFS.maybe) return TIERS.maybe;
+  return TIERS.low;
+}
+
+// ---------- factors ----------
+export type FactorKey = "season" | "taste" | "quality" | "history";
+export type Factor = {
+  key: FactorKey;
+  label: string;
+  /** 0-1: how good this signal looks for this movie. */
+  value: number;
+  /** How much this signal counts in the blend. */
+  weight: number;
+  reason: string;
+  tone: "good" | "neutral" | "bad";
+};
+
+// Tune these. Only signals that apply to a movie are blended (weights are re-normalised),
+// so a movie with no seasonal pattern is graded on taste and quality alone.
+// Plan-to-watch is deliberately NOT a signal: planning a movie says nothing about whether it's a good pick.
+export const WEIGHTS: Record<FactorKey, number> = { season: 0.3, taste: 0.4, quality: 0.2, history: 0.3 };
+
+const clamp = (n: number, lo = 0, hi = 1) => Math.min(hi, Math.max(lo, n));
+const toneOf = (v: number): Factor["tone"] => (v >= 0.6 ? "good" : v < 0.35 ? "bad" : "neutral");
+
+// ---------- features ----------
+export function featuresOf(
+  m: Pick<Movie, "id" | "title" | "year" | "genres" | "tags" | "avgRating" | "nRatings">,
+  when: Pick<When, "peakMonth" | "strength" | "source">,
+): MovieFeatures {
+  return {
+    movieId: m.id,
+    title: m.title,
+    year: m.year,
+    genres: m.genres,
+    tags: m.tags.slice(0, 15).map((t) => t.tag),
+    avgRating: m.avgRating,
+    nRatings: m.nRatings,
+    peakMonth: when.peakMonth,
+    weak: when.strength === "mild",
+    seasonSource: when.source,
+  };
+}
+
+// ---------- season ----------
+function seasonFactor(f: MovieFeatures, now: Date): Factor | null {
+  if (f.peakMonth === null) return null; // "any time works": not a signal either way
+  const peak = MONTHS[f.peakMonth];
+  const d = monthsUntil(f.peakMonth, now);
+  const raw = d === 0 ? 1 : d === 1 ? 0.7 : d === 2 ? 0.4 : d === 11 ? 0.45 : d === 10 ? 0.25 : 0.1;
+  const value = f.weak ? 0.5 + (raw - 0.5) * 0.5 : raw; // genre-level guesses count for less
+  const when =
+    d === 0 ? `In season now (best in ${peak})`
+    : d === 1 ? `In season next month (${peak})`
+    : d === 2 ? `Season starts in 2 months (${peak})`
+    : `Best in ${peak}, which is ${d} months away`;
+  return {
+    key: "season",
+    label: "Season",
+    value,
+    weight: WEIGHTS.season,
+    reason: f.weak ? `${when}. Weak, genre-level pattern` : when,
+    tone: toneOf(value),
+  };
+}
+
+// ---------- quality ----------
+const PRIOR_MEAN = 3.4; // rough MovieLens-wide average
+const PRIOR_WEIGHT = 150; // pretend every movie starts with this many average votes
+
+function qualityFactor(f: MovieFeatures): Factor | null {
+  if (f.avgRating == null || f.nRatings == null) return null; // catalog built without --ratings
+  const shrunk = (f.nRatings * f.avgRating + PRIOR_WEIGHT * PRIOR_MEAN) / (f.nRatings + PRIOR_WEIGHT);
+  const value = clamp((shrunk - 2.5) / 2); // 2.5 stars -> 0, 4.5 stars -> 1
+  const n = f.nRatings.toLocaleString("en-US");
+  const reason =
+    value >= 0.65 ? `Highly rated: ${f.avgRating.toFixed(1)}/5 from ${n} MovieLens users`
+    : value < 0.35 ? `Rated low: ${f.avgRating.toFixed(1)}/5 from ${n} MovieLens users`
+    : `Decent ratings: ${f.avgRating.toFixed(1)}/5 from ${n} MovieLens users`;
+  return { key: "quality", label: "Quality", value, weight: WEIGHTS.quality, reason, tone: toneOf(value) };
+}
+
+// ---------- taste (compares against movies you've watched and rated; plan-to-watch is ignored) ----------
+type Sig = { genres: string[]; tags: string[] };
+const signature = (m: Sig) => new Set([...m.tags.map((t) => `t:${t}`), ...m.genres.map((g) => `g:${g}`)]);
+
+function compare(a: Set<string>, b: Set<string>) {
+  const shared: string[] = [];
+  for (const x of a) if (b.has(x)) shared.push(x);
+  const sim = a.size + b.size ? (2 * shared.length) / (a.size + b.size) : 0; // Dice coefficient
+  shared.sort((x, y) => (x[0] === "t" ? 0 : 1) - (y[0] === "t" ? 0 : 1)); // tags are more specific than genres
+  return { sim, shared: shared.map((x) => x.slice(2)) };
+}
+
+/** How much a library entry says about your taste: -1 (hated it) to +1 (loved it). */
+function affinity(e: LibraryEntry) {
+  if (e.rating != null) return (e.rating - 3) / 2;
+  return 0.2; // watched but unrated: a mild positive
+}
+
+const verb = (e: LibraryEntry) => (e.rating != null ? `rated ${e.rating}★` : "watched");
+
+type Hit = { strength: number; entry: LibraryEntry; shared: string[] };
+
+function tasteFactor(f: MovieFeatures, lib: Library): Factor | null {
+  const mine = signature(f);
+  let pos: Hit | null = null;
+  let neg: Hit | null = null;
+  let near = 0;
+  let signal = 0;
+  for (const [id, entry] of Object.entries(lib)) {
+    if (Number(id) === f.movieId || entry.status !== "watched") continue;
+    const a = affinity(entry);
+    if (a === 0) continue; // a 3-star rating says nothing either way
+    signal++;
+    const { sim, shared } = compare(mine, signature({ genres: entry.genres ?? [], tags: entry.tags ?? [] }));
+    const strength = Math.min(1, sim * 2.5) * (0.4 + 0.6 * Math.abs(a));
+    if (a > 0) {
+      if (sim >= 0.15) near++;
+      if (!pos || strength > pos.strength) pos = { strength, entry, shared };
+    } else if (!neg || strength > neg.strength) {
+      neg = { strength, entry, shared };
+    }
+  }
+  if (!signal) return null; // empty library: nothing to match against
+
+  const extra = Math.max(0, near - 1);
+  const posValue = pos ? Math.min(1, pos.strength + Math.min(0.16, extra * 0.08)) : 0;
+  const negValue = neg?.strength ?? 0;
+  const value = clamp(posValue - 0.7 * negValue);
+
+  let reason = "Different from what you've watched so far";
+  if (neg && negValue >= 0.2 && negValue > posValue * 0.7) {
+    reason = `Similar to ${neg.entry.title}, which you ${verb(neg.entry)}`;
+  } else if (pos && pos.strength >= 0.2) {
+    reason = `Shares ${pos.shared.slice(0, 3).join(", ")} with ${pos.entry.title}, which you ${verb(pos.entry)}`;
+    if (extra > 0) reason += ` (+${extra} more like it)`;
+  }
+  return { key: "taste", label: "Taste", value, weight: WEIGHTS.taste, reason, tone: toneOf(value) };
+}
+
+// ---------- history (your own rating of this movie, for rewatches) ----------
+function historyFactor(entry: LibraryEntry | null): Factor | null {
+  if (entry?.status !== "watched" || entry.rating == null) return null;
+  const value = (entry.rating - 1) / 4; // 1 star -> 0, 5 stars -> 1
+  const r = entry.rating;
+  const reason =
+    r >= 4 ? `You rated it ${r}★, so it's worth a rewatch`
+    : r === 3 ? `You rated it ${r}★`
+    : `You rated it ${r}★, so probably not a rewatch`;
+  return { key: "history", label: "You", value, weight: WEIGHTS.history, reason, tone: toneOf(value) };
+}
+
+// ---------- the blend ----------
+export type Scored = {
+  state: "scored" | "unknown";
+  /** null only when there is no signal at all. Watched movies are scored too: you can always rewatch. */
+  score: number | null;
+  tier: Tier;
+  /** Most influential first. */
+  factors: Factor[];
+  status: LibraryEntry["status"] | null;
+  rating: number | null;
+};
+
+export function scoreMovie(f: MovieFeatures, lib: Library, now: Date): Scored {
+  const entry = lib[String(f.movieId)] ?? null;
+  const base = { status: entry?.status ?? null, rating: entry?.rating ?? null };
+
+  const factors = [seasonFactor(f, now), tasteFactor(f, lib), qualityFactor(f), historyFactor(entry)].filter(
+    (x): x is Factor => !!x,
+  );
+  if (!factors.length) return { ...base, state: "unknown", score: null, tier: TIERS.unknown, factors: [] };
+
+  const totalWeight = factors.reduce((s, x) => s + x.weight, 0);
+  const score = Math.round((100 * factors.reduce((s, x) => s + x.weight * x.value, 0)) / totalWeight);
+  // Order by how far each signal pulls the score away from "meh" (0.5), in either direction.
+  factors.sort((a, b) => b.weight * Math.abs(b.value - 0.5) - a.weight * Math.abs(a.value - 0.5));
+  return { ...base, state: "scored", score, tier: tierFor(score), factors };
+}
+</file>
+
+<file path="src/lib/seasons.ts">
+// Pure helpers, safe to import from both server and client code.
+// (Colour now comes from the watch score in score.ts, not from the month.)
+
+export const MONTHS = [
+  "January", "February", "March", "April", "May", "June",
+  "July", "August", "September", "October", "November", "December",
+];
+export const MONTH_SHORT = MONTHS.map((m) => m.slice(0, 3));
+
+/** Months from now until the next time `peak` comes round (0 = this month). */
+export const monthsUntil = (peak: number, now = new Date()) => (peak - now.getMonth() + 12) % 12;
+</file>
+
+<file path="src/lib/types.ts">
+// Month indices are 0-11 (Jan = 0) everywhere in the app.
+
+export type Seasonal = { peakMonth: number; lift: number; peakYears: number };
+
+export type Movie = {
+  id: number;
+  title: string;
+  altTitle: string | null;
+  year: number | null;
+  genres: string[];
+  tags: { tag: string; n: number }[];
+  imdbId: string | null;
+  tmdbId: number | null;
+  nRatings: number | null;
+  avgRating: number | null;
+  seasonal: Seasonal | null;
+};
+
+export type MovieSummary = {
+  id: number;
+  title: string;
+  year: number | null;
+  genres: string[];
+  tmdbId: number | null;
+};
+
+/** Where a movie sits in the year, and why we think so. */
+export type When = {
+  peakMonth: number | null;
+  source: "learned" | "tags" | "genre" | "none";
+  strength: "strong" | "mild" | "none";
+  reason: string;
+};
+
+export type CastMember = {
+  id: number;
+  name: string;
+  character: string | null;
+  profilePath: string | null;
+};
+
+export type TmdbMovie = {
+  posterPath: string | null;
+  overview: string | null;
+  tagline: string | null;
+  runtime: number | null;
+  cast: CastMember[];
+};
+
+export type TmdbStatus = "ok" | "disabled" | "unavailable";
+
+export type MovieDetail = {
+  movie: Movie;
+  when: When;
+  tmdb: TmdbMovie | null;
+  tmdbStatus: TmdbStatus;
+};
+
+export type SearchHit = {
+  id: number;
+  title: string;
+  year: number | null;
+  genres: string[];
+};
+
+// ---- mesh ----
+export type MeshMovieData = {
+  kind: "movie";
+  movieId: number;
+  title: string;
+  year: number | null;
+  tmdbId: number | null;
+  posterPath: string | null;
+  // ---- inputs to the watch score (see lib/score.ts) ----
+  genres: string[];
+  /** Most agreed-upon tags first. */
+  tags: string[];
+  avgRating: number | null;
+  nRatings: number | null;
+  peakMonth: number | null;
+  /** True when the peak month is only a weak, genre-level guess. */
+  weak?: boolean;
+  seasonSource: When["source"];
+  via: string | null;
+  loading?: boolean;
+};
+
+/** Everything the watch score needs to know about a movie. */
+export type MovieFeatures = Pick<
+  MeshMovieData,
+  "movieId" | "title" | "year" | "genres" | "tags" | "avgRating" | "nRatings" | "peakMonth" | "weak" | "seasonSource"
+>;
+
+export type Starter = MovieFeatures & { id: number };
+
+// ---- personal library (watched / plan to watch) ----
+export type WatchStatus = "watched" | "planned";
+
+export type LibraryEntry = {
+  status: WatchStatus;
+  /** 1-5 stars, only meaningful once watched. */
+  rating: number | null;
+  // Snapshot of the movie so taste matching works without re-fetching anything.
+  title: string;
+  year: number | null;
+  genres: string[];
+  tags: string[];
+  at: number;
+};
+
+/** Keyed by MovieLens movie id (as a string). */
+export type Library = Record<string, LibraryEntry>;
+
+export type MeshPersonData = {
+  kind: "person";
+  personId: number;
+  name: string;
+  character: string | null;
+  profilePath: string | null;
+  via: string | null;
+  loading?: boolean;
+};
+
+export type MeshNodeData = MeshMovieData | MeshPersonData;
+
+export type ExpandResponse = {
+  nodes: ({ id: string } & MeshNodeData)[];
+  edges: { source: string; target: string; via: string }[];
+  tmdb: TmdbStatus;
+};
+</file>
+
+<file path="package.json">
+{
+  "name": "moviemesh",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint"
+  },
+  "dependencies": {
+    "@fontsource-variable/bricolage-grotesque": "^5.3.0",
+    "@fontsource-variable/instrument-sans": "^5.3.0",
+    "@xyflow/react": "^12.12.0",
+    "next": "16.3.8",
+    "react": "19.2.8",
+    "react-dom": "19.2.8"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4",
+    "@types/node": "^24.19.1",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "eslint": "^9",
+    "eslint-config-next": "16.3.8",
+    "tailwindcss": "^4",
+    "typescript": "^5"
+  }
+}
+</file>
+
+<file path="src/components/MeshCanvas.tsx">
+"use client";
+
+import { useCallback, useEffect, useRef, useSyncExternalStore } from "react";
+import {
+  Background,
+  Controls,
+  ReactFlow,
+  ReactFlowProvider,
+  useEdgesState,
+  useNodesState,
+  useReactFlow,
+  type Edge,
+  type ColorMode,
+  type Node,
+  type NodeMouseHandler,
+} from "@xyflow/react";
+import "@xyflow/react/dist/style.css";
+import { findLinks, spotAside, spotNear } from "@/lib/links";
+import type { ExpandResponse, MeshMovieData, MeshNodeData, TmdbStatus } from "@/lib/types";
+import { MovieNode, PersonNode } from "./nodes";
+
+type FlowNode = Node<MeshNodeData>;
+const nodeTypes = { movie: MovieNode, person: PersonNode };
+
+type Point = { x: number; y: number };
+
+// React Flow wants to know light vs dark. The server can't know the visitor's setting, so it
+// renders "light" and the client switches right after hydrating (reading it during render would
+// make the server and client HTML differ, which is the hydration error).
+const DARK_QUERY = "(prefers-color-scheme: dark)";
+function subscribeColorMode(cb: () => void) {
+  const mq = window.matchMedia(DARK_QUERY);
+  mq.addEventListener("change", cb);
+  return () => mq.removeEventListener("change", cb);
+}
+const clientColorMode = (): ColorMode => (window.matchMedia(DARK_QUERY).matches ? "dark" : "light");
+const serverColorMode = (): ColorMode => "light";
+
+/** Fan new nodes out around `center`, away from the node it was reached from. */
+function place(center: Point, from: Point | null, count: number): Point[] {
+  if (!count) return [];
+  const radius = 280 + count * 14;
+  const full = !from;
+  const base = from ? Math.atan2(center.y - from.y, center.x - from.x) : -Math.PI / 2;
+  const arc = full ? Math.PI * 2 : Math.min(Math.PI * 1.2, 0.55 * count + 0.4);
+  return Array.from({ length: count }, (_, i) => {
+    const a = full ? base + (arc * i) / count : base - arc / 2 + (arc * (i + 0.5)) / count;
+    return { x: center.x + Math.cos(a) * radius, y: center.y + Math.sin(a) * radius };
+  });
+}
+
+/** Ask the mesh to reveal a movie: zoom to it if it's on the canvas, otherwise add it. */
+export type Focus = { data: MeshMovieData; castIds: number[]; nonce: number };
+
+type Props = {
+  root: MeshMovieData;
+  focus: Focus | null;
+  onSelect: (data: MeshNodeData) => void;
+  onTmdb: (status: TmdbStatus) => void;
+  onError: (message: string) => void;
+};
+
+/** Mount with `key={root.movieId}` so choosing a new movie starts a fresh mesh. */
+export function MeshCanvas(props: Props) {
+  return (
+    <ReactFlowProvider>
+      <Mesh {...props} />
+    </ReactFlowProvider>
+  );
+}
+
+function Mesh({ root, focus, onSelect, onTmdb, onError }: Props) {
+  const [nodes, setNodes, onNodesChange] = useNodesState<FlowNode>([
+    { id: `m:${root.movieId}`, type: "movie", position: { x: 0, y: 0 }, data: root },
+  ]);
+  const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
+  const colorMode = useSyncExternalStore(subscribeColorMode, clientColorMode, serverColorMode);
+  const { fitView, getNodes } = useReactFlow();
+  const handledFocus = useRef(0);
+  const expanded = useRef(new Set<string>());
+  const parents = useRef(new Map<string, string>());
+
+  const fit = useCallback(() => {
+    const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    window.setTimeout(() => void fitView({ padding: 0.25, maxZoom: 1, duration: reduce ? 0 : 450 }), 80);
+  }, [fitView]);
+
+  const expand = useCallback(
+    async (node: FlowNode) => {
+      const id = node.id;
+      if (expanded.current.has(id)) return;
+      expanded.current.add(id);
+      const setLoading = (loading: boolean) =>
+        setNodes((ns) => ns.map((n) => (n.id === id ? { ...n, data: { ...n.data, loading } } : n)));
+      setLoading(true);
+      try {
+        const d = node.data;
+        const url =
+          d.kind === "movie"
+            ? `/api/expand?type=movie&id=${d.movieId}`
+            : `/api/expand?type=person&id=${d.personId}&name=${encodeURIComponent(d.name)}`;
+        const res = await fetch(url);
+        const body = await res.json();
+        if (!res.ok) throw new Error(body.error ?? "Couldn't load connections.");
+        const data = body as ExpandResponse;
+        onTmdb(data.tmdb);
+
+        setNodes((ns) => {
+          const have = new Set(ns.map((n) => n.id));
+          const parent = ns.find((n) => n.id === id);
+          if (!parent) return ns;
+          const grand = ns.find((n) => n.id === parents.current.get(id));
+          const fresh = data.nodes.filter((n) => !have.has(n.id));
+          const spots = place(parent.position, grand?.position ?? null, fresh.length);
+          fresh.forEach((n) => parents.current.set(n.id, id));
+          return [...ns, ...fresh.map((n, i) => ({ id: n.id, type: n.kind, position: spots[i], data: n }))];
+        });
+        setEdges((es) => {
+          const have = new Set(es.map((e) => e.id));
+          const add = data.edges
+            .map((e) => ({ id: `${e.source}>${e.target}`, source: e.source, target: e.target }))
+            .filter((e) => !have.has(e.id) && !have.has(`${e.target}>${e.source}`));
+          return [...es, ...add];
+        });
+        if (data.nodes.length) fit();
+      } catch (e) {
+        expanded.current.delete(id);
+        onError(e instanceof Error ? e.message : "Couldn't load connections.");
+      } finally {
+        setLoading(false);
+      }
+    },
+    [fit, onError, onTmdb, setEdges, setNodes],
+  );
+
+  // Grow the first node once, as soon as the mesh appears.
+  useEffect(() => {
+    const t = setTimeout(() => void expand(nodes[0]), 0);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Reveal a movie picked from outside the canvas (e.g. My list).
+  useEffect(() => {
+    if (!focus || handledFocus.current === focus.nonce) return;
+    const t = setTimeout(() => {
+      handledFocus.current = focus.nonce;
+      const id = `m:${focus.data.movieId}`;
+      const current = getNodes() as FlowNode[];
+      const existing = current.find((n) => n.id === id);
+      let shown: MeshNodeData = existing ? existing.data : focus.data;
+
+      if (!existing) {
+        const links = findLinks(focus.data, focus.castIds, current);
+        const anchor = links.length ? current.find((n) => n.id === links[0].nodeId) : undefined;
+        const others = current.map((n) => n.position);
+        const grand = anchor ? current.find((n) => n.id === parents.current.get(anchor.id)) : undefined;
+        const position = anchor ? spotNear(anchor.position, grand?.position ?? null, others) : spotAside(others);
+        shown = { ...focus.data, via: links.length ? `Similar: ${links[0].via}` : "From your list (not linked to anything here yet)" };
+        if (anchor) parents.current.set(id, anchor.id);
+        setNodes((ns) => [...ns, { id, type: "movie", position, data: shown }]);
+        setEdges((es) => [
+          ...es,
+          ...links.map((l) => ({ id: `${l.nodeId}>${id}`, source: l.nodeId, target: id })),
+        ]);
+      }
+      setNodes((ns) => ns.map((n) => ({ ...n, selected: n.id === id })));
+      onSelect(shown);
+      const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+      // let React Flow measure the new node before zooming to it
+      window.setTimeout(() => void fitView({ nodes: [{ id }], padding: 1.2, maxZoom: 1, duration: reduce ? 0 : 500 }), 120);
+    }, 0);
+    return () => clearTimeout(t);
+  }, [focus, fitView, getNodes, onSelect, setEdges, setNodes]);
+
+  const onNodeClick: NodeMouseHandler<FlowNode> = useCallback(
+    (_, node) => {
+      onSelect(node.data);
+      void expand(node);
+    },
+    [expand, onSelect],
+  );
+
+  return (
+    <ReactFlow
+      nodes={nodes}
+      edges={edges}
+      onNodesChange={onNodesChange}
+      onEdgesChange={onEdgesChange}
+      nodeTypes={nodeTypes}
+      onNodeClick={onNodeClick}
+      nodesConnectable={false}
+      defaultEdgeOptions={{ type: "straight", style: { strokeWidth: 1.5 } }}
+      fitView
+      fitViewOptions={{ padding: 0.4, maxZoom: 1 }}
+      minZoom={0.2}
+      maxZoom={1.5}
+      colorMode={colorMode}
+    >
+      <Background gap={28} size={1} color="var(--line)" />
+      <Controls showInteractive={false} />
+    </ReactFlow>
+  );
+}
+</file>
+
+<file path="src/components/MoviePanel.tsx">
+/* eslint-disable @next/next/no-img-element */
+"use client";
+
+import { useMemo } from "react";
+import { imageUrl } from "@/lib/images";
+import { setRating, setStatus, useLibrary } from "@/lib/library";
+import { featuresOf, scoreMovie, tierFor } from "@/lib/score";
+import type { MovieDetail, WatchStatus } from "@/lib/types";
+
+const chip = "rounded-full border border-line px-2.5 py-0.5 text-xs text-ink";
+const toggle = (on: boolean) =>
+  `rounded-full border px-3 py-1.5 text-sm ${on ? "border-ink bg-ink text-surface" : "border-line hover:border-line-strong"}`;
+
+function runtime(min: number | null) {
+  if (!min) return null;
+  const h = Math.floor(min / 60);
+  return h ? `${h}h ${min % 60}m` : `${min}m`;
+}
+
+/** Everything we know about one movie, plus the watched/planned tracker and the watch score. */
+export function MoviePanel({
+  detail,
+  now,
+  via,
+  showTmdbNote = true,
+}: {
+  detail: MovieDetail;
+  now: Date;
+  via?: string | null;
+  /** The explorer already shows one TMDB notice over the canvas, so it turns this one off. */
+  showTmdbNote?: boolean;
+}) {
+  const { movie, when, tmdb, tmdbStatus } = detail;
+  const lib = useLibrary();
+  const features = useMemo(() => featuresOf(movie, when), [movie, when]);
+  const scored = useMemo(() => scoreMovie(features, lib, now), [features, lib, now]);
+  const color = scored.tier.color;
+  const entry = lib[String(movie.id)];
+  const toggleStatus = (st: WatchStatus) => setStatus(features, entry?.status === st ? null : st);
+  const poster = imageUrl(tmdb?.posterPath ?? null, "w342");
+  const meta = [movie.year, runtime(tmdb?.runtime ?? null), movie.avgRating ? `${movie.avgRating.toFixed(1)} avg rating` : null]
+    .filter(Boolean);
+
+  return (
+    <article className="flex flex-col gap-6">
+      <header className="flex gap-4">
+        {poster ? (
+          <img src={poster} alt={`Poster for ${movie.title}`} className="h-36 w-24 shrink-0 rounded-md object-cover" />
+        ) : (
+          <div
+            aria-hidden
+            className="grid h-36 w-24 shrink-0 place-items-center rounded-md font-display text-3xl"
+            style={{ background: `color-mix(in srgb, ${color} 25%, var(--surface))` }}
+          >
+            {movie.title.slice(0, 1)}
+          </div>
+        )}
+        <div className="min-w-0">
+          <h2 className="font-display text-2xl font-semibold leading-tight">{movie.title}</h2>
+          {movie.altTitle && <p className="mt-0.5 text-sm text-muted">{movie.altTitle}</p>}
+          <p className="mt-2 flex flex-wrap gap-x-3 text-sm text-muted">
+            {meta.map((m) => (
+              <span key={String(m)}>{m}</span>
+            ))}
+          </p>
+          {tmdb?.tagline && <p className="mt-2 text-sm italic text-muted">{tmdb.tagline}</p>}
+          {via && <p className="mt-2 text-sm text-muted">Linked by: {via}</p>}
+        </div>
+      </header>
+
+      <section aria-label="Your list" className="-mt-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <button type="button" aria-pressed={entry?.status === "watched"} onClick={() => toggleStatus("watched")} className={toggle(entry?.status === "watched")}>
+            {entry?.status === "watched" ? "✓ Watched" : "Mark as watched"}
+          </button>
+          <button type="button" aria-pressed={entry?.status === "planned"} onClick={() => toggleStatus("planned")} className={toggle(entry?.status === "planned")}>
+            {entry?.status === "planned" ? "✓ On plan-to-watch list" : "+ Plan to watch"}
+          </button>
+        </div>
+        {entry?.status === "watched" && (
+          <div className="mt-3 flex items-center gap-1" role="group" aria-label="Your rating">
+            <span className="mr-1 text-sm text-muted">Your rating (update it any time, even after a rewatch)</span>
+            {[1, 2, 3, 4, 5].map((n) => (
+              <button
+                key={n}
+                type="button"
+                aria-label={`${n} star${n > 1 ? "s" : ""}`}
+                aria-pressed={entry.rating === n}
+                onClick={() => setRating(features, n)}
+                className={`text-xl leading-none ${entry.rating !== null && n <= entry.rating ? "text-ink" : "text-line-strong"}`}
+              >
+                ★
+              </button>
+            ))}
+          </div>
+        )}
+      </section>
+
+      <section aria-labelledby="score-h">
+        <h3 id="score-h" className="font-display text-base font-semibold">Watch score</h3>
+        <p className="mt-2 flex items-center gap-2 font-display text-xl">
+          <span aria-hidden className="h-3 w-3 rounded-full" style={{ background: color }} />
+          {scored.tier.label}
+          {scored.score !== null && <span className="text-sm text-muted">{scored.score}/100</span>}
+        </p>
+        {scored.status === "watched" && (
+          <p className="mt-2 text-sm text-muted">
+            You&apos;ve watched this. The score shows how good a pick it is for a rewatch.
+          </p>
+        )}
+        {scored.state === "unknown" && (
+          <p className="mt-2 text-sm text-muted">
+            Nothing to go on yet. Mark movies you&apos;ve watched and rate them, and this will start grading.
+          </p>
+        )}
+        {scored.factors.length > 0 && (
+          <>
+            <h4 className="mt-4 text-sm font-medium">Why</h4>
+            <ul className="mt-2 space-y-2.5">
+              {scored.factors.map((f) => (
+                <li key={f.key} className="flex items-start gap-3 text-sm">
+                  <span className="mt-1 flex w-14 shrink-0 flex-col gap-1">
+                    <span className="text-[11px] font-medium uppercase tracking-wide text-muted">{f.label}</span>
+                    <span aria-hidden className="h-1.5 overflow-hidden rounded bg-line">
+                      <span className="block h-full" style={{ width: `${Math.round(f.value * 100)}%`, background: tierFor(f.value * 100).color }} />
+                    </span>
+                  </span>
+                  <span className="min-w-0 flex-1">{f.reason}</span>
+                </li>
+              ))}
+            </ul>
+            <p className="mt-3 text-xs text-muted">
+              A weighted blend of the signals above. Rating more movies sharpens the taste match.
+            </p>
+          </>
+        )}
+      </section>
+
+      {tmdb?.overview && <p className="max-w-prose text-sm leading-relaxed">{tmdb.overview}</p>}
+      {showTmdbNote && tmdbStatus === "disabled" && (
+        <p className="text-sm text-muted">Posters, summaries and cast need a TMDB key. See the README.</p>
+      )}
+      {showTmdbNote && tmdbStatus === "unavailable" && (
+        <p className="text-sm text-muted">TMDB didn&apos;t respond for this movie, so posters and cast are hidden for now.</p>
+      )}
+
+      {movie.genres.length > 0 && (
+        <section aria-labelledby="genres-h">
+          <h3 id="genres-h" className="font-display text-base font-semibold">Genres</h3>
+          <ul className="mt-2 flex flex-wrap gap-1.5">
+            {movie.genres.map((g) => (
+              <li key={g} className={chip}>{g}</li>
+            ))}
+          </ul>
+        </section>
+      )}
+
+      {movie.tags.length > 0 && (
+        <section aria-labelledby="tags-h">
+          <h3 id="tags-h" className="font-display text-base font-semibold">What people tag it</h3>
+          <ul className="mt-2 flex flex-wrap gap-1.5">
+            {movie.tags.slice(0, 12).map((t) => (
+              <li key={t.tag} className={chip}>{t.tag}</li>
+            ))}
+          </ul>
+        </section>
+      )}
+
+      {tmdb && tmdb.cast.length > 0 && (
+        <section aria-labelledby="cast-h">
+          <h3 id="cast-h" className="font-display text-base font-semibold">Cast</h3>
+          <ul className="mt-2 space-y-1 text-sm">
+            {tmdb.cast.slice(0, 8).map((c) => (
+              <li key={c.id}>
+                {c.name}
+                {c.character && <span className="text-muted"> as {c.character}</span>}
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+
+      {tmdb && (
+        <p className="text-xs text-muted">
+          This product uses the TMDB API but is not endorsed or certified by TMDB.
+        </p>
+      )}
+    </article>
+  );
+}
+</file>
+
+<file path="src/components/nodes.tsx">
+"use client";
+/* eslint-disable @next/next/no-img-element */
+
+import { useMemo } from "react";
+import { Handle, Position, type Node, type NodeProps } from "@xyflow/react";
+import { imageUrl } from "@/lib/images";
+import { useLibrary } from "@/lib/library";
+import { scoreMovie } from "@/lib/score";
+import type { MeshMovieData, MeshPersonData } from "@/lib/types";
+
+// Edges run centre to centre, so both handles sit invisibly in the middle of the node.
+const anchor = { opacity: 0, pointerEvents: "none" as const, left: "50%", top: "50%" };
+const Anchors = () => (
+  <>
+    <Handle type="target" position={Position.Top} style={anchor} />
+    <Handle type="source" position={Position.Top} style={anchor} />
+  </>
+);
+
+export function MovieNode({ data, selected }: NodeProps<Node<MeshMovieData, "movie">>) {
+  const lib = useLibrary();
+  const scored = useMemo(() => scoreMovie(data, lib, new Date()), [data, lib]);
+  const { tier } = scored;
+  const color = tier.color;
+  const poster = imageUrl(data.posterPath, "w92");
+  return (
+    <div
+      className="relative flex w-44 items-center gap-2.5 rounded-lg bg-surface p-2 text-left"
+      style={{
+        border: `3px ${tier.dashed ? "dashed" : "solid"} ${color}`,
+        boxShadow: selected
+          ? "0 0 0 3px var(--ink)"
+          : tier.id === "now"
+            ? `0 0 0 5px color-mix(in srgb, ${color} 30%, transparent)`
+            : "0 1px 2px rgb(0 0 0 / 0.1)",
+      }}
+    >
+      <Anchors />
+      {scored.status && (
+        <span
+          aria-label={scored.status === "watched" ? "Watched" : "On your plan-to-watch list"}
+          className="absolute -right-2 -top-2 grid h-5 w-5 place-items-center rounded-full bg-ink text-[11px] leading-none text-surface"
+        >
+          {scored.status === "watched" ? "✓" : "+"}
+        </span>
+      )}
+      {poster ? (
+        <img src={poster} alt="" className="h-14 w-10 shrink-0 rounded object-cover" />
+      ) : (
+        <div
+          aria-hidden
+          className="grid h-14 w-10 shrink-0 place-items-center rounded font-display text-base"
+          style={{ background: `color-mix(in srgb, ${color} 25%, var(--surface))` }}
+        >
+          {data.title.slice(0, 1)}
+        </div>
+      )}
+      <div className="min-w-0">
+        <p className="line-clamp-2 text-[13px] font-medium leading-tight">{data.title}</p>
+        <p className="mt-0.5 text-xs text-muted">
+          {data.loading ? "Loading..." : (data.year ?? "")}
+          {!data.loading && scored.status === "watched" && scored.rating !== null && (
+            <span className="font-semibold text-ink"> · {"★".repeat(scored.rating)}</span>
+          )}
+          {!data.loading && scored.score !== null && (
+            <span className="font-semibold" style={{ color }}>
+              {" "}
+              · {scored.score}
+            </span>
+          )}
+        </p>
+      </div>
+    </div>
+  );
+}
+
+export function PersonNode({ data, selected }: NodeProps<Node<MeshPersonData, "person">>) {
+  const photo = imageUrl(data.profilePath, "w92");
+  return (
+    <div
+      className="flex w-40 items-center gap-2 rounded-full bg-surface py-1.5 pl-1.5 pr-3"
+      style={{
+        border: "2px solid var(--line-strong)",
+        boxShadow: selected ? "0 0 0 3px var(--ink)" : "0 1px 2px rgb(0 0 0 / 0.1)",
+      }}
+    >
+      <Anchors />
+      {photo ? (
+        <img src={photo} alt="" className="h-9 w-9 shrink-0 rounded-full object-cover" />
+      ) : (
+        <div aria-hidden className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-ground text-sm">
+          {data.name.slice(0, 1)}
+        </div>
+      )}
+      <div className="min-w-0">
+        <p className="line-clamp-1 text-xs font-medium">{data.name}</p>
+        <p className="text-[11px] text-muted">{data.loading ? "Loading..." : "Actor"}</p>
+      </div>
+    </div>
+  );
+}
 </file>
 
 <file path=".gitignore">
@@ -1662,7 +3082,6 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
 lib64/
 parts/
 sdist/
@@ -1821,6 +3240,7 @@ pyrightconfig.json
 
 /data/catalog.db
 /data/ml-32m
+data\seasonal_movies.csv
 </file>
 
 </files>

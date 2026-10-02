@@ -14,6 +14,7 @@ const snap = (id: string, e: LibraryEntry) => ({
   year: e.year,
   genres: e.genres,
   tags: e.tags,
+  cast: e.cast,
 });
 
 const when = (at: number) =>

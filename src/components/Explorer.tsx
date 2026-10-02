@@ -19,7 +19,7 @@ type Selection =
   | null;
 
 const rootFrom = (d: MovieDetail): MeshMovieData => ({
-  ...featuresOf(d.movie, d.when),
+  ...featuresOf(d.movie, d.when, d.tmdb?.cast),
   kind: "movie",
   tmdbId: d.movie.tmdbId,
   posterPath: d.tmdb?.posterPath ?? null,

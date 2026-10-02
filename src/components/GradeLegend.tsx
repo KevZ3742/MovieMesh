@@ -42,7 +42,7 @@ export function GradeLegend() {
               ))}
             </ul>
             <p className="mt-2 text-xs text-muted">
-              Rim = watch score right now, from season, your taste, and ratings. Watched movies are scored too, for rewatching. ✓ watched, + planned.
+              Rim = watch score out of 100, from rating, streaks, season, and your taste. Watched movies are scored too, for rewatching. ✓ watched, + planned.
             </p>
           </>
         )}

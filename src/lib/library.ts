@@ -50,7 +50,9 @@ export function useLibrary(): Library {
   return useSyncExternalStore(subscribe, read, () => EMPTY);
 }
 
-type Snap = Pick<MovieFeatures, "movieId" | "title" | "year" | "genres" | "tags">;
+type Snap = Pick<MovieFeatures, "movieId" | "title" | "year" | "genres" | "tags"> & {
+  cast?: { id: number; name: string }[];
+};
 
 const entryFor = (m: Snap, status: WatchStatus, rating: number | null, prev?: LibraryEntry): LibraryEntry => ({
   status,
@@ -59,6 +61,7 @@ const entryFor = (m: Snap, status: WatchStatus, rating: number | null, prev?: Li
   year: m.year,
   genres: m.genres,
   tags: m.tags,
+  cast: m.cast ?? prev?.cast, // keep what we already knew if this caller has no cast
   // `at` = when it entered its current list, so history sorts by when you actually marked it
   at: prev && prev.status === status ? prev.at : Date.now(),
 });

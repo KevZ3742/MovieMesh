@@ -75,6 +75,8 @@ export type MeshMovieData = {
   genres: string[];
   /** Most agreed-upon tags first. */
   tags: string[];
+  /** Top-billed cast when TMDB is available (used for actor streaks). */
+  cast?: { id: number; name: string }[];
   avgRating: number | null;
   nRatings: number | null;
   peakMonth: number | null;
@@ -88,7 +90,7 @@ export type MeshMovieData = {
 /** Everything the watch score needs to know about a movie. */
 export type MovieFeatures = Pick<
   MeshMovieData,
-  "movieId" | "title" | "year" | "genres" | "tags" | "avgRating" | "nRatings" | "peakMonth" | "weak" | "seasonSource"
+  "movieId" | "title" | "year" | "genres" | "tags" | "cast" | "avgRating" | "nRatings" | "peakMonth" | "weak" | "seasonSource"
 >;
 
 export type Starter = MovieFeatures & { id: number };
@@ -105,6 +107,8 @@ export type LibraryEntry = {
   year: number | null;
   genres: string[];
   tags: string[];
+  /** Top-billed cast, saved when TMDB was available. Missing = unknown (used for actor streaks). */
+  cast?: { id: number; name: string }[];
   at: number;
 };
 
