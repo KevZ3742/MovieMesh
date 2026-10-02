@@ -1,0 +1,58 @@
+@import "tailwindcss";
+
+/* Palette: cool paper, indigo ink. The loud colours live in lib/seasons.ts (one per month). */
+:root {
+  --ground: #edeff3;
+  --surface: #ffffff;
+  --ink: #1b2140;
+  --muted: #5c6480;
+  --line: #d3d8e2;
+  --line-strong: #b6bdcc;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --ground: #12162a;
+    --surface: #1b2140;
+    --ink: #e9ecf6;
+    --muted: #9aa3be;
+    --line: #2b3358;
+    --line-strong: #434c75;
+  }
+}
+
+@theme inline {
+  --color-ground: var(--ground);
+  --color-surface: var(--surface);
+  --color-ink: var(--ink);
+  --color-muted: var(--muted);
+  --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
+  --font-display: "Bricolage Grotesque Variable", ui-sans-serif, system-ui, sans-serif;
+  --font-sans: "Instrument Sans Variable", ui-sans-serif, system-ui, sans-serif;
+}
+
+body {
+  background: var(--ground);
+  color: var(--ink);
+  font-family: var(--font-sans);
+}
+
+:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: 2px;
+}
+
+/* React Flow: use our palette instead of its defaults */
+.react-flow {
+  --xy-background-color: var(--ground);
+  --xy-edge-stroke-default: var(--line-strong);
+  --xy-controls-button-background-color: var(--surface);
+  --xy-controls-button-background-color-hover: var(--ground);
+  --xy-controls-button-color: var(--ink);
+  --xy-controls-button-border-color: var(--line);
+  --xy-attribution-background-color: transparent;
+}
+.react-flow__node {
+  cursor: pointer;
+}

@@ -1,0 +1,1826 @@
+This file is a merged representation of the entire codebase, combined into a single document by Repomix.
+
+<file_summary>
+This section contains a summary of this file.
+
+<purpose>
+This file contains a packed representation of the entire repository's contents.
+It is designed to be easily consumable by AI systems for analysis, code review,
+or other automated processes.
+</purpose>
+
+<file_format>
+The content is organized as follows:
+1. This summary section
+2. Repository information
+3. Directory structure
+4. Repository files (if enabled)
+5. Multiple file entries, each consisting of:
+  - File path as an attribute
+  - Full contents of the file
+</file_format>
+
+<usage_guidelines>
+- This file should be treated as read-only. Any changes should be made to the
+  original repository files, not this packed version.
+- When processing this file, use the file path to distinguish
+  between different files in the repository.
+- Be aware that this file may contain sensitive information. Handle it with
+  the same level of security as you would the original repository.
+</usage_guidelines>
+
+<notes>
+- Some files may have been excluded based on .gitignore rules and Repomix's configuration
+- Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
+- Files matching patterns in .gitignore are excluded
+- Files matching default ignore patterns are excluded
+- Files are sorted by Git change count (files with more changes are at the bottom)
+</notes>
+
+</file_summary>
+
+<directory_structure>
+data/
+  build_catalog.py
+  explore_ratings.py
+  README.txt
+public/
+  file.svg
+  globe.svg
+  next.svg
+  vercel.svg
+  window.svg
+src/
+  app/
+    api/
+      expand/
+        route.ts
+      movie/
+        [id]/
+          route.ts
+      search/
+        route.ts
+    movie/
+      [id]/
+        page.tsx
+    globals.css
+    layout.tsx
+    page.tsx
+  components/
+    Explorer.tsx
+    MeshCanvas.tsx
+    MonthStrip.tsx
+    MoviePanel.tsx
+    nodes.tsx
+    SearchBox.tsx
+    SetupMessage.tsx
+.env.example
+.gitignore
+AGENTS.md
+CLAUDE.md
+eslint.config.mjs
+next.config.ts
+package.json
+postcss.config.mjs
+README.md
+tsconfig.json
+</directory_structure>
+
+<files>
+This section contains the contents of the repository's files.
+
+<file path="data/build_catalog.py">
+"""
+Build catalog.db (SQLite) from MovieLens ml-32m files.
+
+Tables
+  movies(movie_id, title, alt_title, year, genres_raw, imdb_id, tmdb_id, n_ratings, avg_rating)
+  movie_genres(movie_id, genre)
+  movie_tags(movie_id, tag, n_taggers)      -- cleaned: spam user removed, >= MIN_TAGGERS distinct users, top TAGS_PER_MOVIE
+  seasonal_movies(movie_id, peak_month, lift, n, peak_years)   -- only if seasonal_movies.csv exists
+  movies_fts                                -- full-text search over title + alt_title (if SQLite has FTS5)
+
+Usage:  python build_catalog.py [path/to/ml-32m] [--ratings]
+  --ratings   also read ratings.csv to fill n_ratings / avg_rating (slow-ish; adds a popularity signal)
+Output: catalog.db in the current folder.
+"""
+import re
+import sqlite3
+import sys
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+SPAM_USER = 78213     # wrote ~36% of all tags
+MIN_TAGGERS = 3       # a tag must come from >= this many distinct users for that movie
+TAGS_PER_MOVIE = 20   # keep the most-agreed-upon tags per movie
+
+args = [a for a in sys.argv[1:] if not a.startswith("--")]
+use_ratings = "--ratings" in sys.argv
+root = Path(args[0] if args else ".")
+if not (root / "movies.csv").exists() and (root / "ml-32m" / "movies.csv").exists():
+    root = root / "ml-32m"
+for f in ("movies.csv", "links.csv", "tags.csv") + (("ratings.csv",) if use_ratings else ()):
+    if not (root / f).exists():
+        sys.exit(f"Can't find {f} in {root.resolve()}. Pass the folder containing the CSVs.")
+
+# ---------- movies ----------
+ARTICLE = re.compile(r"^(.*), (The|A|An|Les|La|Le|Los|Las|El|Il|Der|Die|Das|L')$")
+
+
+def split_title(raw):
+    """'City of Lost Children, The (Cité des enfants perdus, La) (1995)' -> ('The City of Lost Children', 'Cité des enfants perdus, La', 1995)"""
+    year = None
+    m = re.search(r"\((\d{4})\)\s*$", raw)
+    if m:
+        year, raw = int(m.group(1)), raw[:m.start()].strip()
+    main, _, alt = raw.partition(" (")
+    a = ARTICLE.match(main)
+    if a:
+        main = f"{a.group(2)}{'' if a.group(2).endswith(chr(39)) else ' '}{a.group(1)}"
+    return main.strip(), alt.rstrip(")").strip() or None, year
+
+
+movies = pd.read_csv(root / "movies.csv")
+parts = movies.title.map(split_title)
+movies["title_clean"] = [p[0] for p in parts]
+movies["alt_title"] = [p[1] for p in parts]
+movies["year"] = [p[2] for p in parts]
+
+links = pd.read_csv(root / "links.csv", dtype={"imdbId": str, "tmdbId": str})  # keep leading zeros on imdbId
+movies = movies.merge(links, on="movieId", how="left")
+movies["imdb_id"] = np.where(movies.imdbId.notna(), "tt" + movies.imdbId.fillna(""), None)
+movies["tmdb_id"] = pd.to_numeric(movies.tmdbId, errors="coerce")
+
+movies["n_ratings"] = None
+movies["avg_rating"] = None
+if use_ratings:
+    n_max = int(movies.movieId.max()) + 1
+    cnt, tot = np.zeros(n_max), np.zeros(n_max)
+    for chunk in pd.read_csv(root / "ratings.csv", usecols=["movieId", "rating"], chunksize=4_000_000):
+        mid = chunk.movieId.values
+        cnt += np.bincount(mid, minlength=n_max)
+        tot += np.bincount(mid, weights=chunk.rating.values, minlength=n_max)
+    c = cnt[movies.movieId.values]
+    movies["n_ratings"] = c.astype(int)
+    movies["avg_rating"] = np.where(c > 0, tot[movies.movieId.values] / np.maximum(c, 1), np.nan).round(3)
+
+genres = (movies[["movieId", "genres"]].assign(genre=movies.genres.str.split("|")).explode("genre")
+          .query("genre != '(no genres listed)'")[["movieId", "genre"]]
+          .rename(columns={"movieId": "movie_id"}))
+
+# ---------- tags ----------
+tags = pd.read_csv(root / "tags.csv", usecols=["userId", "movieId", "tag"])
+n_raw = len(tags)
+tags = tags[tags.userId != SPAM_USER].dropna(subset=["tag"])
+tags["tag"] = tags.tag.str.lower().str.replace(r"\s+", " ", regex=True).str.strip()
+tags = tags[tags.tag != ""]
+agg = (tags.groupby(["movieId", "tag"]).userId.nunique().rename("n_taggers").reset_index()
+       .query("n_taggers >= @MIN_TAGGERS")
+       .sort_values(["movieId", "n_taggers"], ascending=[True, False])
+       .groupby("movieId").head(TAGS_PER_MOVIE)
+       .rename(columns={"movieId": "movie_id"}))
+
+# ---------- write sqlite ----------
+db_path = Path.cwd() / "catalog.db"
+if db_path.exists():
+    db_path.unlink()
+con = sqlite3.connect(db_path)
+con.executescript("""
+CREATE TABLE movies(
+  movie_id INTEGER PRIMARY KEY, title TEXT NOT NULL, alt_title TEXT, year INTEGER,
+  genres_raw TEXT, imdb_id TEXT, tmdb_id INTEGER, n_ratings INTEGER, avg_rating REAL);
+CREATE TABLE movie_genres(movie_id INTEGER NOT NULL, genre TEXT NOT NULL);
+CREATE TABLE movie_tags(movie_id INTEGER NOT NULL, tag TEXT NOT NULL, n_taggers INTEGER NOT NULL);
+""")
+
+
+def obj(df):  # NaN/NA -> None so sqlite stores NULL
+    return df.astype(object).where(df.notna(), None)
+
+
+m_out = obj(movies[["movieId", "title_clean", "alt_title", "year", "genres", "imdb_id", "tmdb_id",
+                    "n_ratings", "avg_rating"]])
+m_out["year"] = m_out.year.map(lambda v: None if v is None else int(v))
+m_out["tmdb_id"] = m_out.tmdb_id.map(lambda v: None if v is None else int(v))
+con.executemany("INSERT INTO movies VALUES (?,?,?,?,?,?,?,?,?)", m_out.itertuples(index=False, name=None))
+genres.to_sql("movie_genres", con, if_exists="append", index=False)
+agg.to_sql("movie_tags", con, if_exists="append", index=False)
+con.executescript("""
+CREATE INDEX idx_genres_movie ON movie_genres(movie_id);
+CREATE INDEX idx_genres_genre ON movie_genres(genre);
+CREATE INDEX idx_tags_movie ON movie_tags(movie_id);
+CREATE INDEX idx_tags_tag ON movie_tags(tag);
+CREATE INDEX idx_movies_tmdb ON movies(tmdb_id);
+CREATE INDEX idx_movies_year ON movies(year);
+""")
+
+seasonal_csv = Path.cwd() / "seasonal_movies.csv"
+if seasonal_csv.exists():
+    s = pd.read_csv(seasonal_csv).rename(columns={"movieId": "movie_id"})
+    con.execute("CREATE TABLE seasonal_movies(movie_id INTEGER PRIMARY KEY, peak_month TEXT, lift REAL, n INTEGER, peak_years INTEGER)")
+    s[["movie_id", "peak_month", "lift", "n", "peak_years"]].to_sql("seasonal_movies", con, if_exists="append", index=False)
+
+fts = True
+try:
+    con.execute("CREATE VIRTUAL TABLE movies_fts USING fts5(title, alt_title, content='movies', content_rowid='movie_id')")
+    con.execute("INSERT INTO movies_fts(rowid, title, alt_title) SELECT movie_id, title, COALESCE(alt_title,'') FROM movies")
+except sqlite3.OperationalError:
+    fts = False
+con.commit()
+
+# ---------- report ----------
+q = lambda sql: con.execute(sql).fetchall()
+print(f"Wrote {db_path} ({db_path.stat().st_size/1e6:.1f} MB)")
+print(f"movies: {q('SELECT COUNT(*) FROM movies')[0][0]:,}")
+print(f"  no year: {q('SELECT COUNT(*) FROM movies WHERE year IS NULL')[0][0]:,} | "
+      f"no tmdb id: {q('SELECT COUNT(*) FROM movies WHERE tmdb_id IS NULL')[0][0]:,} | "
+      f"no genres: {q('SELECT COUNT(*) FROM movies WHERE movie_id NOT IN (SELECT movie_id FROM movie_genres)')[0][0]:,}")
+print(f"tags: {n_raw:,} raw rows -> {len(agg):,} kept (spam user removed, >= {MIN_TAGGERS} taggers, top {TAGS_PER_MOVIE}/movie)")
+print(f"  movies with >=1 tag: {agg.movie_id.nunique():,} | distinct tags kept: {agg.tag.nunique():,}")
+print(f"  no genres but has tags (tags can fill the gap): "
+      f"{q('SELECT COUNT(*) FROM movies WHERE movie_id NOT IN (SELECT movie_id FROM movie_genres) AND movie_id IN (SELECT movie_id FROM movie_tags)')[0][0]:,}")
+print("  most common tags:", ", ".join(f"{t} ({n})" for t, n in q("SELECT tag, COUNT(*) c FROM movie_tags GROUP BY tag ORDER BY c DESC LIMIT 25")))
+print("full-text search:", "yes" if fts else "no (this SQLite build lacks FTS5)")
+if seasonal_csv.exists():
+    print(f"seasonal_movies: {q('SELECT COUNT(*) FROM seasonal_movies')[0][0]:,}")
+print("sample:", q("SELECT movie_id, title, alt_title, year, tmdb_id FROM movies WHERE movie_id IN (1, 2, 11, 3114, 112556)"))
+</file>
+
+<file path="data/explore_ratings.py">
+"""
+Does ratings.csv contain a real "when" signal?  (v2)
+
+New in v2:
+  0. Threshold sensitivity: how do the results change if "bulk day" means >5, >15, >30, >100 ratings/day?
+  3. Recurrence check: a movie only counts as seasonal if its peak month repeats across
+     several different YEARS (filters out one-time bursts like a few users rating one movie in May 2015).
+  Exports seasonal_movies.csv (the movies that pass) to the current folder.
+
+Cleaning used for all tables (at the MAIN threshold):
+  - drops "bulk days" (user rating > MAIN movies in one day = backfilling, not watching)
+  - keeps only ratings made >= MIN_AGE_YEARS after release, so new releases don't look "seasonal"
+
+Usage:  python explore_ratings.py [path/to/ml-32m]
+"""
+import sys
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+THRESHOLDS = [5, 15, 30, 100]   # bulk-day thresholds to compare
+MAIN = 15                       # threshold used for sections 1-3 (must be in THRESHOLDS)
+MIN_AGE_YEARS = 2
+MIN_RATINGS_PER_MOVIE = 300     # section 3: movies with fewer clean ratings are skipped
+MIN_GROUP_RATINGS = 2000        # sections 1-2: skip groups with fewer ratings
+MIN_LIFT = 2.0                  # "recurring" needs peak-month lift >= this ...
+MIN_PEAK_YEARS = 4              # ... in at least this many different years (>= 3 ratings each) ...
+MIN_RATINGS_PER_PEAK_YEAR = 3
+MAX_TOP_YEAR_SHARE = 0.35       # ... and no single year may hold more than this share of peak-month ratings
+
+root = Path(sys.argv[1] if len(sys.argv) > 1 else ".")
+if not (root / "movies.csv").exists() and (root / "ml-32m" / "movies.csv").exists():
+    root = root / "ml-32m"
+if not (root / "movies.csv").exists():
+    sys.exit(f"Can't find movies.csv in {root.resolve()} (or its ml-32m subfolder). "
+             "Pass the folder containing the CSVs: python explore_ratings.py path/to/ml-32m")
+
+movies = pd.read_csv(root / "movies.csv")
+movies["year"] = movies.title.str.extract(r"\((\d{4})\)\s*$")[0].astype(float)
+N = int(movies.movieId.max()) + 1
+year_of = np.full(N, np.nan)
+year_of[movies.movieId.values] = movies.year.values
+title_of = movies.set_index("movieId").title
+
+tags = pd.read_csv(root / "tags.csv", usecols=["userId", "movieId", "tag"])
+tags = tags[tags.userId != 78213]  # one user wrote ~36% of all tags
+
+KEYWORDS = {
+    "christmas": r"\bchristmas\b|\bxmas\b",
+    "halloween": r"\bhalloween\b",
+    "valentine": r"\bvalentine",
+    "thanksgiving": r"\bthanksgiving\b",
+    "new year": r"\bnew year",
+    "summer": r"\bsummer\b",
+    "winter": r"\bwinter\b",
+    "beach": r"\bbeach\b",
+    "snow": r"\bsnow\b",
+    "spring": r"\bspring\b",
+}
+
+
+def ids_for(pattern):
+    by_title = movies.loc[movies.title.str.contains(pattern, case=False, regex=True), "movieId"]
+    t = tags.loc[tags.tag.str.contains(pattern, case=False, regex=True, na=False), "movieId"]
+    c = t.value_counts()
+    return set(by_title) | set(c[c >= 3].index)  # tag must come from >= 3 taggers
+
+
+kw_ids = {name: ids_for(p) for name, p in KEYWORDS.items()}
+genre_ids = {g: set(grp.movieId) for g, grp in
+             movies.assign(genre=movies.genres.str.split("|")).explode("genre").groupby("genre")
+             if g != "(no genres listed)"}
+
+# ---- one pass over ratings ----
+mms = {t: np.zeros(N * 12, dtype=np.int64) for t in THRESHOLDS}   # movie x month counts per threshold
+kept = {t: 0 for t in THRESHOLDS}
+rows = []                                                          # (movieId, year, month0) at MAIN threshold
+hour, dow = np.zeros(24), np.zeros(7)
+total = 0
+
+for chunk in pd.read_csv(root / "ratings.csv", chunksize=2_000_000):
+    dt = pd.to_datetime(chunk.timestamp, unit="s")
+    total += len(chunk)
+    size = chunk.groupby(["userId", dt.dt.floor("D")])["movieId"].transform("size").values
+    mid = chunk.movieId.values
+    yr = dt.dt.year.values
+    month = dt.dt.month.values - 1
+    ok_age = (yr - year_of[mid]) >= MIN_AGE_YEARS  # unknown release year -> NaN -> False -> dropped
+    for t in THRESHOLDS:
+        keep = (size <= t) & ok_age
+        kept[t] += int(keep.sum())
+        mms[t] += np.bincount(mid[keep] * 12 + month[keep], minlength=N * 12)
+        if t == MAIN:
+            rows.append(np.stack([mid[keep], yr[keep], month[keep]], 1).astype(np.int32))
+            hour += np.bincount(dt.dt.hour.values[keep], minlength=24)
+            dow += np.bincount(dt.dt.dayofweek.values[keep], minlength=7)
+
+mats = {t: m.reshape(N, 12) for t, m in mms.items()}
+M = "Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec".split()
+
+
+def group_lift(mat, ids):
+    ids = np.array(sorted(i for i in ids if i < N))
+    c = mat[ids].sum(0)
+    if c.sum() == 0:
+        return np.full(12, np.nan), 0
+    return c / c.sum() / (mat.sum(0) / mat.sum()), int(c.sum())
+
+
+print(f"{total:,} ratings read.\n")
+print("== 0. Sensitivity to the bulk-day threshold")
+print("   (does a stricter/looser definition of 'bulk day' change the conclusions?)")
+print(f"{'bulk if >':>10} {'kept':>12} {'%':>5} {'movies>=300':>12} {'xmas Dec':>9} {'hallo Oct':>10} {'horror Oct':>11}")
+for t in THRESHOLDS:
+    mat = mats[t]
+    n_m = mat.sum(1)
+    xm = group_lift(mat, kw_ids["christmas"])[0][11]
+    hw = group_lift(mat, kw_ids["halloween"])[0][9]
+    hr = group_lift(mat, genre_ids["Horror"])[0][9]
+    star = "  <- used below" if t == MAIN else ""
+    print(f"{t:>10} {kept[t]:>12,} {kept[t]/total:>5.0%} {(n_m >= MIN_RATINGS_PER_MOVIE).sum():>12,} "
+          f"{xm:>9.2f} {hw:>10.2f} {hr:>11.2f}{star}")
+
+mm = mats[MAIN]
+base = mm.sum(0) / mm.sum()
+header = " " * 16 + " ".join(f"{m:>5}" for m in M) + "   n"
+
+
+def lift_row(label, ids):
+    lift, n = group_lift(mm, ids)
+    if n < MIN_GROUP_RATINGS:
+        return None
+    return f"{label:>15} " + " ".join(f"{x:5.2f}" for x in lift) + f" {n:>8,}  peak {M[int(np.nanargmax(lift))]}"
+
+
+print(f"\n== 1. Keyword seasons at bulk threshold {MAIN} (lift 1.0 = no seasonality)")
+print(header)
+for name, ids in kw_ids.items():
+    print(lift_row(f"{name} ({len(ids)})", ids) or f"{name:>15} ({len(ids)} movies) too few ratings")
+
+print("\n== 2. By genre")
+print(header)
+for genre, ids in genre_ids.items():
+    row = lift_row(genre, ids)
+    if row:
+        print(row)
+
+# ---- section 3: individual movies, with recurrence check ----
+print(f"\n== 3. Individual movies: seasonal AND recurring (>= {MIN_RATINGS_PER_MOVIE} clean ratings)")
+n_m = mm.sum(1)
+cand = np.where(n_m >= MIN_RATINGS_PER_MOVIE)[0]
+if len(cand) == 0:
+    sys.exit("No movie has enough clean ratings for section 3 (is this a sample of ratings.csv?)")
+exp = np.outer(n_m[cand], base)
+effect = ((mm[cand] - exp) ** 2 / exp).sum(1) / n_m[cand]      # how uneven across months
+lift_m = mm[cand] / n_m[cand][:, None] / base
+peak, peak_lift = lift_m.argmax(1), lift_m.max(1)
+
+df = pd.DataFrame(np.concatenate(rows), columns=["movieId", "year", "month"])
+df = df[df.movieId.isin(cand)]
+df["peak"] = df.movieId.map(pd.Series(peak, index=cand))
+per_year = (df[df.month == df.peak].groupby(["movieId", "year"]).size().rename("c").reset_index())
+agg = per_year.groupby("movieId").c.agg(
+    peak_years=lambda x: int((x >= MIN_RATINGS_PER_PEAK_YEAR).sum()),
+    top_year_share=lambda x: x.max() / x.sum())
+
+res = pd.DataFrame({"movieId": cand, "title": [title_of.get(i, str(i)) for i in cand], "n": n_m[cand],
+                    "effect": effect, "peak_month": [M[p] for p in peak], "lift": peak_lift}).set_index("movieId")
+res = res.join(agg).fillna({"peak_years": 0, "top_year_share": 1.0})
+seasonal_enough = res.lift >= MIN_LIFT
+recurring = seasonal_enough & (res.peak_years >= MIN_PEAK_YEARS) & (res.top_year_share <= MAX_TOP_YEAR_SHARE)
+res["verdict"] = np.where(recurring, "RECURRING", np.where(seasonal_enough, "burst?", "weak"))
+
+print(f"Of {len(res):,} candidate movies: {int(recurring.sum())} RECURRING, "
+      f"{int((seasonal_enough & ~recurring).sum())} 'burst?' (high lift but not repeating across years), "
+      f"{int((~seasonal_enough).sum())} weak/none.")
+print(f"(median effect = {res.effect.median():.3f}: the noise floor)")
+print("\nRecurrence needs: lift >= %.1f, >= %d years with >= %d peak-month ratings, no year > %d%% of peak-month ratings."
+      % (MIN_LIFT, MIN_PEAK_YEARS, MIN_RATINGS_PER_PEAK_YEAR, MAX_TOP_YEAR_SHARE * 100))
+
+
+def show(frame, k=30):
+    print(f"{'effect':>7} {'n':>6} {'peak':>5} {'lift':>5} {'yrs':>4} {'topyr%':>7}  {'verdict':<9} title")
+    for _, r in frame.head(k).iterrows():
+        print(f"{r.effect:7.2f} {r.n:6,.0f} {r.peak_month:>5} {r.lift:5.2f} {r.peak_years:4.0f} "
+              f"{r.top_year_share:7.0%}  {r.verdict:<9} {r.title}")
+
+
+top = res.sort_values("effect", ascending=False)
+print("\n-- Top 30 by effect size, with verdicts (this is where Body Snatchers etc. should show as 'burst?')")
+show(top)
+print("\n-- Top 30 RECURRING movies (these are the trustworthy seasonal ones)")
+show(top[top.verdict == "RECURRING"])
+print("\n-- Recurring movies by peak month")
+print(top[top.verdict == "RECURRING"].peak_month.value_counts().reindex(M).fillna(0).astype(int).to_dict())
+
+out = Path.cwd() / "seasonal_movies.csv"
+top[top.verdict == "RECURRING"].reset_index()[
+    ["movieId", "title", "peak_month", "lift", "n", "peak_years", "top_year_share"]].to_csv(out, index=False)
+print(f"\nWrote {out}")
+
+print("\nHour-of-day share (UTC):", np.round(hour / hour.sum(), 3).tolist())
+print("Day-of-week share (Mon..Sun, UTC):", np.round(dow / dow.sum(), 3).tolist())
+</file>
+
+<file path="data/README.txt">
+Put catalog.db here (data/catalog.db).
+
+Build it with:  python build_catalog.py path/to/ml-32m --ratings
+(run explore_ratings.py first, from the same folder, so seasonal_movies.csv gets included)
+</file>
+
+<file path="public/file.svg">
+<svg fill="none" viewBox="0 0 16 16" xmlns="http://www.w3.org/2000/svg"><path d="M14.5 13.5V5.41a1 1 0 0 0-.3-.7L9.8.29A1 1 0 0 0 9.08 0H1.5v13.5A2.5 2.5 0 0 0 4 16h8a2.5 2.5 0 0 0 2.5-2.5m-1.5 0v-7H8v-5H3v12a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1M9.5 5V2.12L12.38 5zM5.13 5h-.62v1.25h2.12V5zm-.62 3h7.12v1.25H4.5zm.62 3h-.62v1.25h7.12V11z" clip-rule="evenodd" fill="#666" fill-rule="evenodd"/></svg>
+</file>
+
+<file path="public/globe.svg">
+<svg fill="none" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><g clip-path="url(#a)"><path fill-rule="evenodd" clip-rule="evenodd" d="M10.27 14.1a6.5 6.5 0 0 0 3.67-3.45q-1.24.21-2.7.34-.31 1.83-.97 3.1M8 16A8 8 0 1 0 8 0a8 8 0 0 0 0 16m.48-1.52a7 7 0 0 1-.96 0H7.5a4 4 0 0 1-.84-1.32q-.38-.89-.63-2.08a40 40 0 0 0 3.92 0q-.25 1.2-.63 2.08a4 4 0 0 1-.84 1.31zm2.94-4.76q1.66-.15 2.95-.43a7 7 0 0 0 0-2.58q-1.3-.27-2.95-.43a18 18 0 0 1 0 3.44m-1.27-3.54a17 17 0 0 1 0 3.64 39 39 0 0 1-4.3 0 17 17 0 0 1 0-3.64 39 39 0 0 1 4.3 0m1.1-1.17q1.45.13 2.69.34a6.5 6.5 0 0 0-3.67-3.44q.65 1.26.98 3.1M8.48 1.5l.01.02q.41.37.84 1.31.38.89.63 2.08a40 40 0 0 0-3.92 0q.25-1.2.63-2.08a4 4 0 0 1 .85-1.32 7 7 0 0 1 .96 0m-2.75.4a6.5 6.5 0 0 0-3.67 3.44 29 29 0 0 1 2.7-.34q.31-1.83.97-3.1M4.58 6.28q-1.66.16-2.95.43a7 7 0 0 0 0 2.58q1.3.27 2.95.43a18 18 0 0 1 0-3.44m.17 4.71q-1.45-.12-2.69-.34a6.5 6.5 0 0 0 3.67 3.44q-.65-1.27-.98-3.1" fill="#666"/></g><defs><clipPath id="a"><path fill="#fff" d="M0 0h16v16H0z"/></clipPath></defs></svg>
+</file>
+
+<file path="public/next.svg">
+<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 394 80"><path fill="#000" d="M262 0h68.5v12.7h-27.2v66.6h-13.6V12.7H262V0ZM149 0v12.7H94v20.4h44.3v12.6H94v21h55v12.6H80.5V0h68.7zm34.3 0h-17.8l63.8 79.4h17.9l-32-39.7 32-39.6h-17.9l-23 28.6-23-28.6zm18.3 56.7-9-11-27.1 33.7h17.8l18.3-22.7z"/><path fill="#000" d="M81 79.3 17 0H0v79.3h13.6V17l50.2 62.3H81Zm252.6-.4c-1 0-1.8-.4-2.5-1s-1.1-1.6-1.1-2.6.3-1.8 1-2.5 1.6-1 2.6-1 1.8.3 2.5 1a3.4 3.4 0 0 1 .6 4.3 3.7 3.7 0 0 1-3 1.8zm23.2-33.5h6v23.3c0 2.1-.4 4-1.3 5.5a9.1 9.1 0 0 1-3.8 3.5c-1.6.8-3.5 1.3-5.7 1.3-2 0-3.7-.4-5.3-1s-2.8-1.8-3.7-3.2c-.9-1.3-1.4-3-1.4-5h6c.1.8.3 1.6.7 2.2s1 1.2 1.6 1.5c.7.4 1.5.5 2.4.5 1 0 1.8-.2 2.4-.6a4 4 0 0 0 1.6-1.8c.3-.8.5-1.8.5-3V45.5zm30.9 9.1a4.4 4.4 0 0 0-2-3.3 7.5 7.5 0 0 0-4.3-1.1c-1.3 0-2.4.2-3.3.5-.9.4-1.6 1-2 1.6a3.5 3.5 0 0 0-.3 4c.3.5.7.9 1.3 1.2l1.8 1 2 .5 3.2.8c1.3.3 2.5.7 3.7 1.2a13 13 0 0 1 3.2 1.8 8.1 8.1 0 0 1 3 6.5c0 2-.5 3.7-1.5 5.1a10 10 0 0 1-4.4 3.5c-1.8.8-4.1 1.2-6.8 1.2-2.6 0-4.9-.4-6.8-1.2-2-.8-3.4-2-4.5-3.5a10 10 0 0 1-1.7-5.6h6a5 5 0 0 0 3.5 4.6c1 .4 2.2.6 3.4.6 1.3 0 2.5-.2 3.5-.6 1-.4 1.8-1 2.4-1.7a4 4 0 0 0 .8-2.4c0-.9-.2-1.6-.7-2.2a11 11 0 0 0-2.1-1.4l-3.2-1-3.8-1c-2.8-.7-5-1.7-6.6-3.2a7.2 7.2 0 0 1-2.4-5.7 8 8 0 0 1 1.7-5 10 10 0 0 1 4.3-3.5c2-.8 4-1.2 6.4-1.2 2.3 0 4.4.4 6.2 1.2 1.8.8 3.2 2 4.3 3.4 1 1.4 1.5 3 1.5 5h-5.8z"/></svg>
+</file>
+
+<file path="public/vercel.svg">
+<svg fill="none" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1155 1000"><path d="m577.3 0 577.4 1000H0z" fill="#fff"/></svg>
+</file>
+
+<file path="public/window.svg">
+<svg fill="none" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><path fill-rule="evenodd" clip-rule="evenodd" d="M1.5 2.5h13v10a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1zM0 1h16v11.5a2.5 2.5 0 0 1-2.5 2.5h-11A2.5 2.5 0 0 1 0 12.5zm3.75 4.5a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5M7 4.75a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0m1.75.75a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5" fill="#666"/></svg>
+</file>
+
+<file path="src/app/api/expand/route.ts">
+import { apiError } from "@/lib/api";
+import { expandMovie, expandPerson } from "@/lib/mesh";
+
+export async function GET(req: Request) {
+  const sp = new URL(req.url).searchParams;
+  const id = Number(sp.get("id"));
+  const type = sp.get("type");
+  if (!Number.isInteger(id) || (type !== "movie" && type !== "person")) {
+    return Response.json({ error: "Use ?type=movie|person&id=<number>." }, { status: 400 });
+  }
+  try {
+    if (type === "movie") {
+      const res = await expandMovie(id);
+      return res ? Response.json(res) : Response.json({ error: `No movie with id ${id}.` }, { status: 404 });
+    }
+    return Response.json(await expandPerson(id, (sp.get("name") ?? "This actor").slice(0, 80)));
+  } catch (err) {
+    return apiError(err);
+  }
+}
+</file>
+
+<file path="src/app/api/movie/[id]/route.ts">
+import { apiError } from "@/lib/api";
+import { loadMovieDetail } from "@/lib/detail";
+
+export async function GET(_req: Request, { params }: { params: Promise<{ id: string }> }) {
+  const id = Number((await params).id);
+  if (!Number.isInteger(id)) return Response.json({ error: "Movie id must be a number." }, { status: 400 });
+  try {
+    const detail = await loadMovieDetail(id);
+    return detail ? Response.json(detail) : Response.json({ error: `No movie with id ${id}.` }, { status: 404 });
+  } catch (err) {
+    return apiError(err);
+  }
+}
+</file>
+
+<file path="src/app/api/search/route.ts">
+import { apiError } from "@/lib/api";
+import { searchMovies } from "@/lib/catalog";
+
+export async function GET(req: Request) {
+  const q = new URL(req.url).searchParams.get("q") ?? "";
+  try {
+    return Response.json({ results: q.trim().length < 2 ? [] : searchMovies(q.slice(0, 80)) });
+  } catch (err) {
+    return apiError(err);
+  }
+}
+</file>
+
+<file path="src/app/movie/[id]/page.tsx">
+import type { Metadata } from "next";
+import Link from "next/link";
+import { notFound } from "next/navigation";
+import { MoviePanel } from "@/components/MoviePanel";
+import { SetupMessage } from "@/components/SetupMessage";
+import { getMovie } from "@/lib/catalog";
+import { CatalogMissingError } from "@/lib/db";
+import { loadMovieDetail } from "@/lib/detail";
+import type { MovieDetail } from "@/lib/types";
+
+type Params = { params: Promise<{ id: string }> };
+
+export async function generateMetadata({ params }: Params): Promise<Metadata> {
+  const id = Number((await params).id);
+  try {
+    const m = Number.isInteger(id) ? getMovie(id) : null;
+    return { title: m ? `${m.title}${m.year ? ` (${m.year})` : ""} - MovieMesh` : "MovieMesh" };
+  } catch {
+    return { title: "MovieMesh" };
+  }
+}
+
+export default async function MoviePage({ params }: Params) {
+  const id = Number((await params).id);
+  if (!Number.isInteger(id)) notFound();
+
+  let detail: MovieDetail | null = null;
+  let setupError: string | null = null;
+  try {
+    detail = await loadMovieDetail(id);
+  } catch (err) {
+    if (!(err instanceof CatalogMissingError)) throw err;
+    setupError = err.message;
+  }
+
+  if (setupError) return <SetupMessage message={setupError} />;
+  if (!detail) notFound();
+  return (
+    <main className="mx-auto w-full max-w-2xl px-5 py-8">
+      <nav className="mb-6 flex items-center justify-between text-sm">
+        <Link href="/" className="font-display text-lg font-semibold">MovieMesh</Link>
+        <Link href={`/?m=${id}`} className="underline underline-offset-4">Open in the mesh</Link>
+      </nav>
+      <MoviePanel detail={detail} now={new Date()} />
+    </main>
+  );
+}
+</file>
+
+<file path="src/app/globals.css">
+@import "tailwindcss";
+
+/* Palette: cool paper, indigo ink. The loud colours live in lib/seasons.ts (one per month). */
+:root {
+  --ground: #edeff3;
+  --surface: #ffffff;
+  --ink: #1b2140;
+  --muted: #5c6480;
+  --line: #d3d8e2;
+  --line-strong: #b6bdcc;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --ground: #12162a;
+    --surface: #1b2140;
+    --ink: #e9ecf6;
+    --muted: #9aa3be;
+    --line: #2b3358;
+    --line-strong: #434c75;
+  }
+}
+
+@theme inline {
+  --color-ground: var(--ground);
+  --color-surface: var(--surface);
+  --color-ink: var(--ink);
+  --color-muted: var(--muted);
+  --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
+  --font-display: "Bricolage Grotesque Variable", ui-sans-serif, system-ui, sans-serif;
+  --font-sans: "Instrument Sans Variable", ui-sans-serif, system-ui, sans-serif;
+}
+
+body {
+  background: var(--ground);
+  color: var(--ink);
+  font-family: var(--font-sans);
+}
+
+:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: 2px;
+}
+
+/* React Flow: use our palette instead of its defaults */
+.react-flow {
+  --xy-background-color: var(--ground);
+  --xy-edge-stroke-default: var(--line-strong);
+  --xy-controls-button-background-color: var(--surface);
+  --xy-controls-button-background-color-hover: var(--ground);
+  --xy-controls-button-color: var(--ink);
+  --xy-controls-button-border-color: var(--line);
+  --xy-attribution-background-color: transparent;
+}
+.react-flow__node {
+  cursor: pointer;
+}
+</file>
+
+<file path="src/app/layout.tsx">
+import type { Metadata } from "next";
+import "@fontsource-variable/bricolage-grotesque";
+import "@fontsource-variable/instrument-sans";
+import "./globals.css";
+
+export const metadata: Metadata = {
+  title: "MovieMesh",
+  description: "Explore how movies connect, and find out when each one is best to watch.",
+};
+
+export default function RootLayout({ children }: { children: React.ReactNode }) {
+  return (
+    <html lang="en" className="h-full antialiased">
+      <body className="min-h-full flex flex-col">{children}</body>
+    </html>
+  );
+}
+</file>
+
+<file path="src/app/page.tsx">
+import { Explorer } from "@/components/Explorer";
+import { SetupMessage } from "@/components/SetupMessage";
+import { CatalogMissingError } from "@/lib/db";
+import { loadMovieDetail, loadStarters } from "@/lib/detail";
+import type { MovieDetail } from "@/lib/types";
+
+export default async function Home({
+  searchParams,
+}: {
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
+}) {
+  const raw = (await searchParams).m;
+  const m = Number(Array.isArray(raw) ? raw[0] : raw);
+
+  let starters: ReturnType<typeof loadStarters> = [];
+  let initial: MovieDetail | null = null;
+  let setupError: string | null = null;
+  try {
+    starters = loadStarters();
+    if (Number.isInteger(m) && m > 0) initial = await loadMovieDetail(m);
+  } catch (err) {
+    if (!(err instanceof CatalogMissingError)) throw err;
+    setupError = err.message;
+  }
+
+  if (setupError) return <SetupMessage message={setupError} />;
+  return <Explorer starters={starters} initial={initial} />;
+}
+</file>
+
+<file path="src/components/Explorer.tsx">
+/* eslint-disable @next/next/no-img-element */
+"use client";
+
+import { useCallback, useMemo, useRef, useState } from "react";
+import { imageUrl } from "@/lib/images";
+import { MONTHS, monthColor } from "@/lib/seasons";
+import type { MeshMovieData, MeshNodeData, MeshPersonData, MovieDetail, TmdbStatus } from "@/lib/types";
+import { MeshCanvas } from "./MeshCanvas";
+import { MonthStrip } from "./MonthStrip";
+import { MoviePanel } from "./MoviePanel";
+import { SearchBox } from "./SearchBox";
+
+type Starter = { id: number; title: string; year: number; peakMonth: number | null; weak: boolean };
+type Selection =
+  | { kind: "movie"; id: number; detail: MovieDetail | null; via: string | null; error?: string }
+  | { kind: "person"; data: MeshPersonData }
+  | null;
+
+const rootFrom = (d: MovieDetail): MeshMovieData => ({
+  kind: "movie",
+  movieId: d.movie.id,
+  title: d.movie.title,
+  year: d.movie.year,
+  tmdbId: d.movie.tmdbId,
+  posterPath: d.tmdb?.posterPath ?? null,
+  peakMonth: d.when.peakMonth,
+  weak: d.when.strength === "mild",
+  via: null,
+});
+
+async function fetchDetail(id: number): Promise<MovieDetail> {
+  const res = await fetch(`/api/movie/${id}`);
+  const body = await res.json();
+  if (!res.ok) throw new Error(body.error ?? "Couldn't load that movie.");
+  return body as MovieDetail;
+}
+
+export function Explorer({ starters, initial }: { starters: Starter[]; initial: MovieDetail | null }) {
+  // `initial` is loaded on the server when the URL has ?m=<id>, so the first paint already has the mesh root.
+  const [root, setRoot] = useState<MeshMovieData | null>(() => (initial ? rootFrom(initial) : null));
+  const [selection, setSelection] = useState<Selection>(() =>
+    initial ? { kind: "movie", id: initial.movie.id, detail: initial, via: null } : null,
+  );
+  const [notice, setNotice] = useState<string | null>(null);
+  const [tmdb, setTmdb] = useState<TmdbStatus | null>(null);
+  const now = useMemo(() => new Date(), []);
+  const cache = useRef(new Map<number, MovieDetail>(initial ? [[initial.movie.id, initial]] : []));
+
+  const loadDetail = useCallback(async (id: number) => {
+    const hit = cache.current.get(id);
+    if (hit) return hit;
+    const d = await fetchDetail(id);
+    cache.current.set(id, d);
+    return d;
+  }, []);
+
+  const choose = useCallback(
+    async (id: number) => {
+      setNotice(null);
+      try {
+        const d = await loadDetail(id);
+        setSelection({ kind: "movie", id, detail: d, via: null });
+        setRoot(rootFrom(d));
+        window.history.replaceState(null, "", `/?m=${id}`);
+      } catch (e) {
+        setNotice(e instanceof Error ? e.message : "Couldn't load that movie.");
+      }
+    },
+    [loadDetail],
+  );
+
+  const onSelect = useCallback(
+    async (data: MeshNodeData) => {
+      if (data.kind === "person") {
+        setSelection({ kind: "person", data });
+        return;
+      }
+      const id = data.movieId;
+      setSelection({ kind: "movie", id, detail: cache.current.get(id) ?? null, via: data.via });
+      try {
+        const d = await loadDetail(id);
+        setSelection((s) => (s?.kind === "movie" && s.id === id ? { ...s, detail: d } : s));
+      } catch (e) {
+        const error = e instanceof Error ? e.message : "Couldn't load that movie.";
+        setSelection((s) => (s?.kind === "movie" && s.id === id ? { ...s, error } : s));
+      }
+    },
+    [loadDetail],
+  );
+
+  const tmdbNote =
+    tmdb === "disabled"
+      ? "Add a TMDB key to see posters and actors in the mesh. See the README."
+      : tmdb === "unavailable"
+        ? "TMDB didn't respond, so posters and actors are hidden for now."
+        : null;
+
+  return (
+    <div className="flex min-h-dvh flex-col lg:h-dvh">
+      <header className="flex flex-wrap items-center gap-x-6 gap-y-2 border-b border-line bg-surface px-4 py-3">
+        <h1 className="font-display text-xl font-semibold">MovieMesh</h1>
+        <SearchBox onChoose={choose} />
+        <p className="ml-auto flex items-center gap-2 text-sm text-muted" suppressHydrationWarning>
+          <span aria-hidden className="h-2.5 w-2.5 rounded-full" style={{ background: monthColor(now.getMonth()) }} />
+          It&apos;s {MONTHS[now.getMonth()]}
+        </p>
+      </header>
+
+      <div className="flex flex-1 flex-col lg:grid lg:min-h-0 lg:grid-cols-[minmax(0,1fr)_400px]">
+        <section aria-label="Movie mesh" className="relative h-[62dvh] border-b border-line lg:h-auto lg:border-b-0 lg:border-r">
+          {root ? (
+            <MeshCanvas key={root.movieId} root={root} onSelect={onSelect} onTmdb={setTmdb} onError={setNotice} />
+          ) : (
+            <div className="grid h-full place-items-center p-6">
+              <div className="max-w-md">
+                <h2 className="font-display text-3xl font-semibold leading-tight">Pick a movie to start your mesh</h2>
+                <p className="mt-3 text-muted">
+                  Each movie links to similar ones. Click any node to grow the mesh from it.
+                </p>
+                <ul className="mt-5 flex flex-wrap gap-2">
+                  {starters.map((s) => (
+                    <li key={s.id}>
+                      <button
+                        type="button"
+                        onClick={() => void choose(s.id)}
+                        className="flex items-center gap-2 rounded-full border border-line bg-surface px-3 py-1.5 text-sm hover:border-line-strong"
+                      >
+                        <span
+                          aria-hidden
+                          className="h-2.5 w-2.5 rounded-full"
+                          style={
+                            s.weak
+                              ? { border: `2px solid ${monthColor(s.peakMonth)}` }
+                              : { background: monthColor(s.peakMonth) }
+                          }
+                        />
+                        {s.title} ({s.year})
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            </div>
+          )}
+
+          <div className="pointer-events-none absolute left-3 top-3 z-10 flex max-w-sm flex-col gap-2" role="status">
+            {notice && (
+              <p className="pointer-events-auto rounded-md border border-line bg-surface px-3 py-2 text-sm shadow">{notice}</p>
+            )}
+            {!notice && tmdbNote && (
+              <p className="rounded-md border border-line bg-surface px-3 py-2 text-sm text-muted shadow">{tmdbNote}</p>
+            )}
+          </div>
+
+          {root && (
+            <div className="pointer-events-none absolute bottom-3 left-14 z-10 hidden w-60 rounded-md border border-line bg-surface/95 p-3 sm:block">
+              <MonthStrip all now={now} />
+              <p className="mt-2 text-xs text-muted">
+                A node&apos;s rim shows the month it&apos;s best watched. Grey means no seasonal pattern, and a dashed
+                rim is only a weak genre-level guess.
+              </p>
+            </div>
+          )}
+        </section>
+
+        <aside aria-label="Details" className="overflow-y-auto bg-surface p-5 lg:min-h-0">
+          {selection?.kind === "movie" && selection.detail && (
+            <MoviePanel detail={selection.detail} now={now} via={selection.via} showTmdbNote={false} />
+          )}
+          {selection?.kind === "movie" && !selection.detail && !selection.error && (
+            <p className="text-sm text-muted">Loading movie...</p>
+          )}
+          {selection?.kind === "movie" && selection.error && <p className="text-sm">{selection.error}</p>}
+          {selection?.kind === "person" && (
+            <div className="flex items-center gap-4">
+              {imageUrl(selection.data.profilePath, "w185") ? (
+                <img src={imageUrl(selection.data.profilePath, "w185")!} alt="" className="h-24 w-24 rounded-full object-cover" />
+              ) : (
+                <div aria-hidden className="grid h-24 w-24 place-items-center rounded-full bg-ground font-display text-3xl">
+                  {selection.data.name.slice(0, 1)}
+                </div>
+              )}
+              <div>
+                <h2 className="font-display text-2xl font-semibold">{selection.data.name}</h2>
+                {selection.data.character && <p className="text-sm text-muted">as {selection.data.character}</p>}
+                {selection.data.via && <p className="mt-1 text-sm text-muted">{selection.data.via}</p>}
+                <p className="mt-3 text-sm">Their other films in the catalog branch out from this node.</p>
+              </div>
+            </div>
+          )}
+          {!selection && (
+            <p className="max-w-prose text-sm text-muted">
+              Select a movie in the mesh to see when it&apos;s best to watch, what people tag it, and who&apos;s in it.
+            </p>
+          )}
+        </aside>
+      </div>
+    </div>
+  );
+}
+</file>
+
+<file path="src/components/MeshCanvas.tsx">
+"use client";
+
+import { useCallback, useEffect, useRef } from "react";
+import {
+  Background,
+  Controls,
+  ReactFlow,
+  ReactFlowProvider,
+  useEdgesState,
+  useNodesState,
+  useReactFlow,
+  type Edge,
+  type Node,
+  type NodeMouseHandler,
+} from "@xyflow/react";
+import "@xyflow/react/dist/style.css";
+import type { ExpandResponse, MeshMovieData, MeshNodeData, TmdbStatus } from "@/lib/types";
+import { MovieNode, PersonNode } from "./nodes";
+
+type FlowNode = Node<MeshNodeData>;
+const nodeTypes = { movie: MovieNode, person: PersonNode };
+
+type Point = { x: number; y: number };
+
+/** Fan new nodes out around `center`, away from the node it was reached from. */
+function place(center: Point, from: Point | null, count: number): Point[] {
+  if (!count) return [];
+  const radius = 280 + count * 14;
+  const full = !from;
+  const base = from ? Math.atan2(center.y - from.y, center.x - from.x) : -Math.PI / 2;
+  const arc = full ? Math.PI * 2 : Math.min(Math.PI * 1.2, 0.55 * count + 0.4);
+  return Array.from({ length: count }, (_, i) => {
+    const a = full ? base + (arc * i) / count : base - arc / 2 + (arc * (i + 0.5)) / count;
+    return { x: center.x + Math.cos(a) * radius, y: center.y + Math.sin(a) * radius };
+  });
+}
+
+type Props = {
+  root: MeshMovieData;
+  onSelect: (data: MeshNodeData) => void;
+  onTmdb: (status: TmdbStatus) => void;
+  onError: (message: string) => void;
+};
+
+/** Mount with `key={root.movieId}` so choosing a new movie starts a fresh mesh. */
+export function MeshCanvas(props: Props) {
+  return (
+    <ReactFlowProvider>
+      <Mesh {...props} />
+    </ReactFlowProvider>
+  );
+}
+
+function Mesh({ root, onSelect, onTmdb, onError }: Props) {
+  const [nodes, setNodes, onNodesChange] = useNodesState<FlowNode>([
+    { id: `m:${root.movieId}`, type: "movie", position: { x: 0, y: 0 }, data: root },
+  ]);
+  const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
+  const { fitView } = useReactFlow();
+  const expanded = useRef(new Set<string>());
+  const parents = useRef(new Map<string, string>());
+
+  const fit = useCallback(() => {
+    const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    window.setTimeout(() => void fitView({ padding: 0.25, maxZoom: 1, duration: reduce ? 0 : 450 }), 80);
+  }, [fitView]);
+
+  const expand = useCallback(
+    async (node: FlowNode) => {
+      const id = node.id;
+      if (expanded.current.has(id)) return;
+      expanded.current.add(id);
+      const setLoading = (loading: boolean) =>
+        setNodes((ns) => ns.map((n) => (n.id === id ? { ...n, data: { ...n.data, loading } } : n)));
+      setLoading(true);
+      try {
+        const d = node.data;
+        const url =
+          d.kind === "movie"
+            ? `/api/expand?type=movie&id=${d.movieId}`
+            : `/api/expand?type=person&id=${d.personId}&name=${encodeURIComponent(d.name)}`;
+        const res = await fetch(url);
+        const body = await res.json();
+        if (!res.ok) throw new Error(body.error ?? "Couldn't load connections.");
+        const data = body as ExpandResponse;
+        onTmdb(data.tmdb);
+
+        setNodes((ns) => {
+          const have = new Set(ns.map((n) => n.id));
+          const parent = ns.find((n) => n.id === id);
+          if (!parent) return ns;
+          const grand = ns.find((n) => n.id === parents.current.get(id));
+          const fresh = data.nodes.filter((n) => !have.has(n.id));
+          const spots = place(parent.position, grand?.position ?? null, fresh.length);
+          fresh.forEach((n) => parents.current.set(n.id, id));
+          return [...ns, ...fresh.map((n, i) => ({ id: n.id, type: n.kind, position: spots[i], data: n }))];
+        });
+        setEdges((es) => {
+          const have = new Set(es.map((e) => e.id));
+          const add = data.edges
+            .map((e) => ({ id: `${e.source}>${e.target}`, source: e.source, target: e.target }))
+            .filter((e) => !have.has(e.id) && !have.has(`${e.target}>${e.source}`));
+          return [...es, ...add];
+        });
+        if (data.nodes.length) fit();
+      } catch (e) {
+        expanded.current.delete(id);
+        onError(e instanceof Error ? e.message : "Couldn't load connections.");
+      } finally {
+        setLoading(false);
+      }
+    },
+    [fit, onError, onTmdb, setEdges, setNodes],
+  );
+
+  // Grow the first node once, as soon as the mesh appears.
+  useEffect(() => {
+    const t = setTimeout(() => void expand(nodes[0]), 0);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const onNodeClick: NodeMouseHandler<FlowNode> = useCallback(
+    (_, node) => {
+      onSelect(node.data);
+      void expand(node);
+    },
+    [expand, onSelect],
+  );
+
+  return (
+    <ReactFlow
+      nodes={nodes}
+      edges={edges}
+      onNodesChange={onNodesChange}
+      onEdgesChange={onEdgesChange}
+      nodeTypes={nodeTypes}
+      onNodeClick={onNodeClick}
+      nodesConnectable={false}
+      defaultEdgeOptions={{ type: "straight", style: { strokeWidth: 1.5 } }}
+      fitView
+      fitViewOptions={{ padding: 0.4, maxZoom: 1 }}
+      minZoom={0.2}
+      maxZoom={1.5}
+      colorMode="system"
+    >
+      <Background gap={28} size={1} color="var(--line)" />
+      <Controls showInteractive={false} />
+    </ReactFlow>
+  );
+}
+</file>
+
+<file path="src/components/MonthStrip.tsx">
+import { MONTHS, MONTH_COLORS, MONTH_SHORT } from "@/lib/seasons";
+
+/**
+ * Twelve cells, one per month. With `peak`, only that month is filled in its colour.
+ * With `all`, every month shows its colour (used as the legend). A dot marks the current month.
+ */
+export function MonthStrip({ peak = null, all = false, now }: { peak?: number | null; all?: boolean; now?: Date }) {
+  const current = now?.getMonth();
+  const label = all
+    ? "Colour for each month of the year"
+    : peak === null
+      ? "No seasonal peak"
+      : `Best in ${MONTHS[peak]}`;
+  return (
+    <div role="img" aria-label={label} className="grid grid-cols-12 gap-[3px]">
+      {MONTHS.map((_, i) => (
+        <div key={i} className="flex flex-col items-center gap-1">
+          <div
+            className="h-5 w-full rounded-[3px]"
+            style={{ background: all || i === peak ? MONTH_COLORS[i] : "var(--line)" }}
+          />
+          <span className="text-[10px] leading-none text-muted">{MONTH_SHORT[i][0]}</span>
+          <span className={`h-1 w-1 rounded-full ${current === i ? "bg-ink" : ""}`} />
+        </div>
+      ))}
+    </div>
+  );
+}
+</file>
+
+<file path="src/components/MoviePanel.tsx">
+/* eslint-disable @next/next/no-img-element */
+import { imageUrl } from "@/lib/images";
+import { monthColor, seasonStatus } from "@/lib/seasons";
+import type { MovieDetail } from "@/lib/types";
+import { MonthStrip } from "./MonthStrip";
+
+const chip = "rounded-full border border-line px-2.5 py-0.5 text-xs text-ink";
+
+function runtime(min: number | null) {
+  if (!min) return null;
+  const h = Math.floor(min / 60);
+  return h ? `${h}h ${min % 60}m` : `${min}m`;
+}
+
+/** Everything we know about one movie. Pure (no hooks), so it renders on the server and the client. */
+export function MoviePanel({
+  detail,
+  now,
+  via,
+  showTmdbNote = true,
+}: {
+  detail: MovieDetail;
+  now: Date;
+  via?: string | null;
+  /** The explorer already shows one TMDB notice over the canvas, so it turns this one off. */
+  showTmdbNote?: boolean;
+}) {
+  const { movie, when, tmdb, tmdbStatus } = detail;
+  const status = seasonStatus(when.peakMonth, now);
+  const color = monthColor(when.peakMonth);
+  const poster = imageUrl(tmdb?.posterPath ?? null, "w342");
+  const meta = [movie.year, runtime(tmdb?.runtime ?? null), movie.avgRating ? `${movie.avgRating.toFixed(1)} avg rating` : null]
+    .filter(Boolean);
+
+  return (
+    <article className="flex flex-col gap-6">
+      <header className="flex gap-4">
+        {poster ? (
+          <img src={poster} alt={`Poster for ${movie.title}`} className="h-36 w-24 shrink-0 rounded-md object-cover" />
+        ) : (
+          <div
+            aria-hidden
+            className="grid h-36 w-24 shrink-0 place-items-center rounded-md font-display text-3xl"
+            style={{ background: `color-mix(in srgb, ${color} 25%, var(--surface))` }}
+          >
+            {movie.title.slice(0, 1)}
+          </div>
+        )}
+        <div className="min-w-0">
+          <h2 className="font-display text-2xl font-semibold leading-tight">{movie.title}</h2>
+          {movie.altTitle && <p className="mt-0.5 text-sm text-muted">{movie.altTitle}</p>}
+          <p className="mt-2 flex flex-wrap gap-x-3 text-sm text-muted">
+            {meta.map((m) => (
+              <span key={String(m)}>{m}</span>
+            ))}
+          </p>
+          {tmdb?.tagline && <p className="mt-2 text-sm italic text-muted">{tmdb.tagline}</p>}
+          {via && <p className="mt-2 text-sm text-muted">Linked by: {via}</p>}
+        </div>
+      </header>
+
+      <section aria-labelledby="when-h">
+        <h3 id="when-h" className="font-display text-base font-semibold">When to watch</h3>
+        <p className="mt-2 flex items-center gap-2 font-display text-xl">
+          <span aria-hidden className="h-3 w-3 rounded-full" style={{ background: color }} />
+          {status.label}
+        </p>
+        <div className="mt-3">
+          <MonthStrip peak={when.peakMonth} now={now} />
+        </div>
+        <p className="mt-3 text-sm text-muted">
+          {when.reason}
+          {when.strength === "mild" && " This is a weak, genre-level pattern."}
+        </p>
+      </section>
+
+      {tmdb?.overview && <p className="max-w-prose text-sm leading-relaxed">{tmdb.overview}</p>}
+      {showTmdbNote && tmdbStatus === "disabled" && (
+        <p className="text-sm text-muted">Posters, summaries and cast need a TMDB key. See the README.</p>
+      )}
+      {showTmdbNote && tmdbStatus === "unavailable" && (
+        <p className="text-sm text-muted">TMDB didn&apos;t respond for this movie, so posters and cast are hidden for now.</p>
+      )}
+
+      {movie.genres.length > 0 && (
+        <section aria-labelledby="genres-h">
+          <h3 id="genres-h" className="font-display text-base font-semibold">Genres</h3>
+          <ul className="mt-2 flex flex-wrap gap-1.5">
+            {movie.genres.map((g) => (
+              <li key={g} className={chip}>{g}</li>
+            ))}
+          </ul>
+        </section>
+      )}
+
+      {movie.tags.length > 0 && (
+        <section aria-labelledby="tags-h">
+          <h3 id="tags-h" className="font-display text-base font-semibold">What people tag it</h3>
+          <ul className="mt-2 flex flex-wrap gap-1.5">
+            {movie.tags.slice(0, 12).map((t) => (
+              <li key={t.tag} className={chip}>{t.tag}</li>
+            ))}
+          </ul>
+        </section>
+      )}
+
+      {tmdb && tmdb.cast.length > 0 && (
+        <section aria-labelledby="cast-h">
+          <h3 id="cast-h" className="font-display text-base font-semibold">Cast</h3>
+          <ul className="mt-2 space-y-1 text-sm">
+            {tmdb.cast.slice(0, 8).map((c) => (
+              <li key={c.id}>
+                {c.name}
+                {c.character && <span className="text-muted"> as {c.character}</span>}
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+
+      {tmdb && (
+        <p className="text-xs text-muted">
+          This product uses the TMDB API but is not endorsed or certified by TMDB.
+        </p>
+      )}
+    </article>
+  );
+}
+</file>
+
+<file path="src/components/nodes.tsx">
+"use client";
+/* eslint-disable @next/next/no-img-element */
+
+import { Handle, Position, type Node, type NodeProps } from "@xyflow/react";
+import { imageUrl } from "@/lib/images";
+import { monthColor, monthsUntil } from "@/lib/seasons";
+import type { MeshMovieData, MeshPersonData } from "@/lib/types";
+
+// Edges run centre to centre, so both handles sit invisibly in the middle of the node.
+const anchor = { opacity: 0, pointerEvents: "none" as const, left: "50%", top: "50%" };
+const Anchors = () => (
+  <>
+    <Handle type="target" position={Position.Top} style={anchor} />
+    <Handle type="source" position={Position.Top} style={anchor} />
+  </>
+);
+
+export function MovieNode({ data, selected }: NodeProps<Node<MeshMovieData, "movie">>) {
+  const color = monthColor(data.peakMonth);
+  const inSeason = !data.weak && data.peakMonth !== null && monthsUntil(data.peakMonth) === 0;
+  const poster = imageUrl(data.posterPath, "w92");
+  return (
+    <div
+      className="flex w-44 items-center gap-2.5 rounded-lg bg-surface p-2 text-left"
+      style={{
+        border: `3px ${data.weak ? "dashed" : "solid"} ${color}`,
+        boxShadow: selected
+          ? "0 0 0 3px var(--ink)"
+          : inSeason
+            ? `0 0 0 5px color-mix(in srgb, ${color} 30%, transparent)`
+            : "0 1px 2px rgb(0 0 0 / 0.1)",
+      }}
+    >
+      <Anchors />
+      {poster ? (
+        <img src={poster} alt="" className="h-14 w-10 shrink-0 rounded object-cover" />
+      ) : (
+        <div
+          aria-hidden
+          className="grid h-14 w-10 shrink-0 place-items-center rounded font-display text-base"
+          style={{ background: `color-mix(in srgb, ${color} 25%, var(--surface))` }}
+        >
+          {data.title.slice(0, 1)}
+        </div>
+      )}
+      <div className="min-w-0">
+        <p className="line-clamp-2 text-[13px] font-medium leading-tight">{data.title}</p>
+        <p className="mt-0.5 text-xs text-muted">{data.loading ? "Loading..." : (data.year ?? "")}</p>
+      </div>
+    </div>
+  );
+}
+
+export function PersonNode({ data, selected }: NodeProps<Node<MeshPersonData, "person">>) {
+  const photo = imageUrl(data.profilePath, "w92");
+  return (
+    <div
+      className="flex w-40 items-center gap-2 rounded-full bg-surface py-1.5 pl-1.5 pr-3"
+      style={{
+        border: "2px solid var(--line-strong)",
+        boxShadow: selected ? "0 0 0 3px var(--ink)" : "0 1px 2px rgb(0 0 0 / 0.1)",
+      }}
+    >
+      <Anchors />
+      {photo ? (
+        <img src={photo} alt="" className="h-9 w-9 shrink-0 rounded-full object-cover" />
+      ) : (
+        <div aria-hidden className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-ground text-sm">
+          {data.name.slice(0, 1)}
+        </div>
+      )}
+      <div className="min-w-0">
+        <p className="line-clamp-1 text-xs font-medium">{data.name}</p>
+        <p className="text-[11px] text-muted">{data.loading ? "Loading..." : "Actor"}</p>
+      </div>
+    </div>
+  );
+}
+</file>
+
+<file path="src/components/SearchBox.tsx">
+"use client";
+
+import { useEffect, useId, useState } from "react";
+import type { SearchHit } from "@/lib/types";
+
+export function SearchBox({ onChoose }: { onChoose: (id: number) => void }) {
+  const [q, setQ] = useState("");
+  const [results, setResults] = useState<SearchHit[]>([]);
+  const [open, setOpen] = useState(false);
+  const [active, setActive] = useState(0);
+  const [error, setError] = useState<string | null>(null);
+  const listId = useId();
+
+  const searching = q.trim().length >= 2;
+
+  useEffect(() => {
+    if (!searching) return;
+    const ctrl = new AbortController();
+    const timer = setTimeout(async () => {
+      try {
+        const res = await fetch(`/api/search?q=${encodeURIComponent(q)}`, { signal: ctrl.signal });
+        const body = await res.json();
+        if (!res.ok) throw new Error(body.error ?? "Search failed");
+        setResults(body.results);
+        setError(null);
+        setActive(0);
+      } catch (e) {
+        if ((e as Error).name !== "AbortError") setError((e as Error).message);
+      }
+    }, 200);
+    return () => {
+      clearTimeout(timer);
+      ctrl.abort();
+    };
+  }, [q, searching]);
+
+  const shown = searching ? results : [];
+
+  const choose = (hit: SearchHit) => {
+    setQ("");
+    setOpen(false);
+    onChoose(hit.id);
+  };
+
+  const onKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      setActive((a) => Math.min(a + 1, shown.length - 1));
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      setActive((a) => Math.max(a - 1, 0));
+    } else if (e.key === "Enter" && shown[active]) {
+      e.preventDefault();
+      choose(shown[active]);
+    } else if (e.key === "Escape") {
+      setOpen(false);
+    }
+  };
+
+  return (
+    <div className="relative w-full max-w-xl">
+      <input
+        type="search"
+        role="combobox"
+        aria-label="Search for a movie"
+        aria-expanded={open && shown.length > 0}
+        aria-controls={listId}
+        aria-activedescendant={open && shown[active] ? `${listId}-${active}` : undefined}
+        autoComplete="off"
+        placeholder="Search for a movie"
+        value={q}
+        onChange={(e) => {
+          setQ(e.target.value);
+          setOpen(true);
+        }}
+        onFocus={() => setOpen(true)}
+        onBlur={() => setTimeout(() => setOpen(false), 120)}
+        onKeyDown={onKeyDown}
+        className="w-full rounded-lg border border-line bg-ground px-3.5 py-2 text-sm placeholder:text-muted"
+      />
+      {open && searching && (
+        <ul
+          id={listId}
+          role="listbox"
+          className="absolute left-0 right-0 top-full z-20 mt-1 max-h-80 overflow-auto rounded-lg border border-line bg-surface py-1 shadow-lg"
+        >
+          {error && <li className="px-3.5 py-2 text-sm text-muted">{error}</li>}
+          {!error && shown.length === 0 && <li className="px-3.5 py-2 text-sm text-muted">No movies match &ldquo;{q}&rdquo;.</li>}
+          {shown.map((r, i) => (
+            <li
+              key={r.id}
+              id={`${listId}-${i}`}
+              role="option"
+              aria-selected={i === active}
+              onMouseDown={(e) => {
+                e.preventDefault();
+                choose(r);
+              }}
+              onMouseEnter={() => setActive(i)}
+              className={`cursor-pointer px-3.5 py-2 ${i === active ? "bg-ground" : ""}`}
+            >
+              <span className="text-sm font-medium">{r.title}</span>
+              {r.year && <span className="ml-2 text-sm text-muted">{r.year}</span>}
+              {r.genres.length > 0 && <span className="block text-xs text-muted">{r.genres.slice(0, 3).join(", ")}</span>}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+</file>
+
+<file path="src/components/SetupMessage.tsx">
+export function SetupMessage({ message }: { message: string }) {
+  return (
+    <main className="mx-auto flex max-w-xl flex-1 flex-col justify-center gap-4 px-6 py-16">
+      <h1 className="font-display text-3xl font-semibold">The movie catalog isn&apos;t set up yet</h1>
+      <p className="text-muted">{message}</p>
+      <ol className="list-decimal space-y-1 pl-5 text-sm">
+        <li>Build it with <code>python build_catalog.py path/to/ml-32m --ratings</code>.</li>
+        <li>Copy the resulting <code>catalog.db</code> to <code>data/catalog.db</code> in this project.</li>
+        <li>Reload this page.</li>
+      </ol>
+    </main>
+  );
+}
+</file>
+
+<file path=".env.example">
+# Optional. Without a TMDB key the app still works from catalog.db,
+# but you get no posters, plot summaries or cast (so no actor nodes in the mesh).
+# Use ONE of these (TMDB account > Settings > API):
+TMDB_READ_TOKEN=
+TMDB_API_KEY=
+
+# Optional: path to the catalog if it isn't at data/catalog.db
+# CATALOG_DB=
+</file>
+
+<file path="AGENTS.md">
+<!-- BEGIN:nextjs-agent-rules -->
+
+# This is NOT the Next.js you know
+
+This version has breaking changes — APIs, conventions, and file structure may all differ from your training data. Read the relevant guide in `node_modules/next/dist/docs/` (resolved from this file's directory; in monorepos the `next` package may not be visible from the repo root) before writing any code. Heed deprecation notices.
+
+This block is written and re-added by `next dev` — verify at `node_modules/next/dist/server/lib/generate-agent-files.js`. Removing it from a diff only re-creates the uncommitted change; committing it with your work keeps the tree clean.
+
+<!-- END:nextjs-agent-rules -->
+</file>
+
+<file path="CLAUDE.md">
+@AGENTS.md
+</file>
+
+<file path="eslint.config.mjs">
+import { defineConfig, globalIgnores } from "eslint/config";
+import nextVitals from "eslint-config-next/core-web-vitals";
+import nextTs from "eslint-config-next/typescript";
+
+const eslintConfig = defineConfig([
+  ...nextVitals,
+  ...nextTs,
+  // Override default ignores of eslint-config-next.
+  globalIgnores([
+    // Default ignores of eslint-config-next:
+    ".next/**",
+    "out/**",
+    "build/**",
+    "next-env.d.ts",
+  ]),
+]);
+
+export default eslintConfig;
+</file>
+
+<file path="next.config.ts">
+import type { NextConfig } from "next";
+
+const nextConfig: NextConfig = {
+  /* config options here */
+};
+
+export default nextConfig;
+</file>
+
+<file path="package.json">
+{
+  "name": "moviemesh",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint"
+  },
+  "dependencies": {
+    "@fontsource-variable/bricolage-grotesque": "^5.3.0",
+    "@fontsource-variable/instrument-sans": "^5.3.0",
+    "@xyflow/react": "^12.12.0",
+    "better-sqlite3": "^13.0.3",
+    "next": "16.3.8",
+    "react": "19.2.8",
+    "react-dom": "19.2.8"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4",
+    "@types/better-sqlite3": "^9.6.0",
+    "@types/node": "^20",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "eslint": "^9",
+    "eslint-config-next": "16.3.8",
+    "tailwindcss": "^4",
+    "typescript": "^5"
+  }
+}
+</file>
+
+<file path="postcss.config.mjs">
+const config = {
+  plugins: {
+    "@tailwindcss/postcss": {},
+  },
+};
+
+export default config;
+</file>
+
+<file path="tsconfig.json">
+{
+  "compilerOptions": {
+    "target": "ES2017",
+    "lib": ["dom", "dom.iterable", "esnext"],
+    "allowJs": true,
+    "skipLibCheck": true,
+    "strict": true,
+    "noEmit": true,
+    "esModuleInterop": true,
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "jsx": "react-jsx",
+    "incremental": true,
+    "plugins": [
+      {
+        "name": "next"
+      }
+    ],
+    "paths": {
+      "@/*": ["./src/*"]
+    }
+  },
+  "include": [
+    "next-env.d.ts",
+    "**/*.ts",
+    "**/*.tsx",
+    ".next/types/**/*.ts",
+    ".next/dev/types/**/*.ts",
+    "**/*.mts"
+  ],
+  "exclude": ["node_modules"]
+}
+</file>
+
+<file path="README.md">
+This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+
+## Getting Started
+
+First, run the development server:
+
+```bash
+npm run dev
+# or
+yarn dev
+# or
+pnpm dev
+# or
+bun dev
+```
+
+Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+
+You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+
+This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+
+## Learn More
+
+To learn more about Next.js, take a look at the following resources:
+
+- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
+- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+
+You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+
+## Deploy on Vercel
+
+The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+
+Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+</file>
+
+<file path=".gitignore">
+# Created by https://www.toptal.com/developers/gitignore/api/nextjs,python
+# Edit at https://www.toptal.com/developers/gitignore?templates=nextjs,python
+
+### NextJS ###
+# dependencies
+/node_modules
+/.pnp
+.pnp.js
+
+# testing
+/coverage
+
+# next.js
+/.next/
+/out/
+
+# production
+/build
+
+# misc
+.DS_Store
+*.pem
+
+# debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# local env files
+.env*.local
+
+# vercel
+.vercel
+
+# typescript
+*.tsbuildinfo
+next-env.d.ts
+
+### Python ###
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyInstaller
+#  Usually these files are written by a python script from a template
+#  before PyInstaller builds the exe, so as to inject date/other infos into it.
+*.manifest
+*.spec
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+cover/
+
+# Translations
+*.mo
+*.pot
+
+# Django stuff:
+*.log
+local_settings.py
+db.sqlite3
+db.sqlite3-journal
+
+# Flask stuff:
+instance/
+.webassets-cache
+
+# Scrapy stuff:
+.scrapy
+
+# Sphinx documentation
+docs/_build/
+
+# PyBuilder
+.pybuilder/
+target/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# IPython
+profile_default/
+ipython_config.py
+
+# pyenv
+#   For a library or package, you might want to ignore these files since the code is
+#   intended to run in multiple environments; otherwise, check them in:
+# .python-version
+
+# pipenv
+#   According to pypa/pipenv#598, it is recommended to include Pipfile.lock in version control.
+#   However, in case of collaboration, if having platform-specific dependencies or dependencies
+#   having no cross-platform support, pipenv may install dependencies that don't work, or not
+#   install all needed dependencies.
+#Pipfile.lock
+
+# poetry
+#   Similar to Pipfile.lock, it is generally recommended to include poetry.lock in version control.
+#   This is especially recommended for binary packages to ensure reproducibility, and is more
+#   commonly ignored for libraries.
+#   https://python-poetry.org/docs/basic-usage/#commit-your-poetrylock-file-to-version-control
+#poetry.lock
+
+# pdm
+#   Similar to Pipfile.lock, it is generally recommended to include pdm.lock in version control.
+#pdm.lock
+#   pdm stores project-wide configurations in .pdm.toml, but it is recommended to not include it
+#   in version control.
+#   https://pdm.fming.dev/#use-with-ide
+.pdm.toml
+
+# PEP 582; used by e.g. github.com/David-OConnor/pyflow and github.com/pdm-project/pdm
+__pypackages__/
+
+# Celery stuff
+celerybeat-schedule
+celerybeat.pid
+
+# SageMath parsed files
+*.sage.py
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Spyder project settings
+.spyderproject
+.spyproject
+
+# Rope project settings
+.ropeproject
+
+# mkdocs documentation
+/site
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Pyre type checker
+.pyre/
+
+# pytype static type analyzer
+.pytype/
+
+# Cython debug symbols
+cython_debug/
+
+# PyCharm
+#  JetBrains specific template is maintained in a separate JetBrains.gitignore that can
+#  be found at https://github.com/github/gitignore/blob/main/Global/JetBrains.gitignore
+#  and can be added to the global gitignore or merged into this file.  For a more nuclear
+#  option (not recommended) you can uncomment the following to ignore the entire idea folder.
+#.idea/
+
+### Python Patch ###
+# Poetry local configuration file - https://python-poetry.org/docs/configuration/#local-configuration
+poetry.toml
+
+# ruff
+.ruff_cache/
+
+# LSP config files
+pyrightconfig.json
+
+# End of https://www.toptal.com/developers/gitignore/api/nextjs,python
+
+/data/catalog.db
+/data/ml-32m
+</file>
+
+</files>
