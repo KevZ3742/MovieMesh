@@ -41,7 +41,8 @@ const BLOB_PATHNAME = process.env.CATALOG_BLOB_PATH || "catalog.db";
 /** CATALOG_DB wins, then data/catalog.db (local dev), then the copy downloaded from Blob. */
 function catalogPath(): string {
   if (process.env.CATALOG_DB) return process.env.CATALOG_DB;
-  if (fs.existsSync(LOCAL_FILE)) return LOCAL_FILE;
+  // turbopackIgnore: these paths are only known at runtime; without it Turbopack traces the whole project.
+  if (fs.existsSync(/* turbopackIgnore: true */ LOCAL_FILE)) return LOCAL_FILE;
   return TMP_FILE;
 }
 
@@ -59,7 +60,8 @@ export function ensureCatalogFile(): Promise<void> {
 }
 
 async function download(): Promise<void> {
-  if (fs.existsSync(catalogPath())) return;
+  const existing = catalogPath();
+  if (fs.existsSync(/* turbopackIgnore: true */ existing)) return;
   if (!process.env.BLOB_READ_WRITE_TOKEN) return; // nothing to download from; getDb() will report the missing file
 
   // Imported lazily so local dev without the package/token never touches it.
@@ -71,8 +73,11 @@ async function download(): Promise<void> {
 
   // Write to a scratch name and rename, so a half-finished download is never opened as a database.
   const partial = `${TMP_FILE}.${process.pid}.part`;
-  await pipeline(Readable.fromWeb(result.stream as unknown as NodeWebStream), fs.createWriteStream(partial));
-  fs.renameSync(partial, TMP_FILE);
+  await pipeline(
+    Readable.fromWeb(result.stream as unknown as NodeWebStream),
+    fs.createWriteStream(/* turbopackIgnore: true */ partial),
+  );
+  fs.renameSync(/* turbopackIgnore: true */ partial, /* turbopackIgnore: true */ TMP_FILE);
 }
 
 // ---------- opening it ----------
