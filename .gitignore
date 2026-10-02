@@ -213,3 +213,4 @@ pyrightconfig.json
 
 /data/catalog.db
 /data/ml-32m
+data\seasonal_movies.csv

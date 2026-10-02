@@ -10,7 +10,7 @@ Tables
 
 Usage:  python build_catalog.py [path/to/ml-32m] [--ratings]
   --ratings   also read ratings.csv to fill n_ratings / avg_rating (slow-ish; adds a popularity signal)
-Output: catalog.db in the current folder.
+Output: data/catalog.db if a data/ folder exists in the current folder, otherwise ./catalog.db.
 """
 import re
 import sqlite3
@@ -26,12 +26,21 @@ TAGS_PER_MOVIE = 20   # keep the most-agreed-upon tags per movie
 
 args = [a for a in sys.argv[1:] if not a.startswith("--")]
 use_ratings = "--ratings" in sys.argv
-root = Path(args[0] if args else ".")
-if not (root / "movies.csv").exists() and (root / "ml-32m" / "movies.csv").exists():
-    root = root / "ml-32m"
+def find_data_root(arg):
+    """Find the folder holding movies.csv. Tries: the path given, ./ml-32m, ./data/ml-32m, ./data."""
+    base = Path(arg) if arg else Path(".")
+    tried = [base, base / "ml-32m", base / "data" / "ml-32m", base / "data"]
+    for c in tried:
+        if (c / "movies.csv").exists():
+            return c
+    sys.exit("Can't find movies.csv. Looked in:\n  " + "\n  ".join(str(t.resolve()) for t in tried)
+             + "\nPass the folder containing the CSVs, e.g.  python build_catalog.py data/ml-32m")
+
+root = find_data_root(args[0] if args else None)
+print(f"Using data in {root.resolve()}")
 for f in ("movies.csv", "links.csv", "tags.csv") + (("ratings.csv",) if use_ratings else ()):
     if not (root / f).exists():
-        sys.exit(f"Can't find {f} in {root.resolve()}. Pass the folder containing the CSVs.")
+        sys.exit(f"Can't find {f} in {root.resolve()}.")
 
 # ---------- movies ----------
 ARTICLE = re.compile(r"^(.*), (The|A|An|Les|La|Le|Los|Las|El|Il|Der|Die|Das|L')$")
@@ -91,7 +100,8 @@ agg = (tags.groupby(["movieId", "tag"]).userId.nunique().rename("n_taggers").res
        .rename(columns={"movieId": "movie_id"}))
 
 # ---------- write sqlite ----------
-db_path = Path.cwd() / "catalog.db"
+# Write into ./data/ when it exists (that's where the Next.js app looks), otherwise the current folder.
+db_path = (Path.cwd() / "data" if (Path.cwd() / "data").is_dir() else Path.cwd()) / "catalog.db"
 if db_path.exists():
     db_path.unlink()
 con = sqlite3.connect(db_path)
@@ -124,7 +134,9 @@ CREATE INDEX idx_movies_tmdb ON movies(tmdb_id);
 CREATE INDEX idx_movies_year ON movies(year);
 """)
 
-seasonal_csv = Path.cwd() / "seasonal_movies.csv"
+# explore_ratings.py writes seasonal_movies.csv next to where catalog.db goes; also accept the current folder.
+seasonal_csv = next((c for c in (db_path.parent / "seasonal_movies.csv", Path.cwd() / "seasonal_movies.csv") if c.exists()),
+                    db_path.parent / "seasonal_movies.csv")
 if seasonal_csv.exists():
     s = pd.read_csv(seasonal_csv).rename(columns={"movieId": "movie_id"})
     con.execute("CREATE TABLE seasonal_movies(movie_id INTEGER PRIMARY KEY, peak_month TEXT, lift REAL, n INTEGER, peak_years INTEGER)")

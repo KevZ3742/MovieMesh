@@ -5,7 +5,7 @@ New in v2:
   0. Threshold sensitivity: how do the results change if "bulk day" means >5, >15, >30, >100 ratings/day?
   3. Recurrence check: a movie only counts as seasonal if its peak month repeats across
      several different YEARS (filters out one-time bursts like a few users rating one movie in May 2015).
-  Exports seasonal_movies.csv (the movies that pass) to the current folder.
+  Exports seasonal_movies.csv (the movies that pass) to ./data/ if it exists, otherwise the current folder.
 
 Cleaning used for all tables (at the MAIN threshold):
   - drops "bulk days" (user rating > MAIN movies in one day = backfilling, not watching)
@@ -29,12 +29,18 @@ MIN_PEAK_YEARS = 4              # ... in at least this many different years (>= 
 MIN_RATINGS_PER_PEAK_YEAR = 3
 MAX_TOP_YEAR_SHARE = 0.35       # ... and no single year may hold more than this share of peak-month ratings
 
-root = Path(sys.argv[1] if len(sys.argv) > 1 else ".")
-if not (root / "movies.csv").exists() and (root / "ml-32m" / "movies.csv").exists():
-    root = root / "ml-32m"
-if not (root / "movies.csv").exists():
-    sys.exit(f"Can't find movies.csv in {root.resolve()} (or its ml-32m subfolder). "
-             "Pass the folder containing the CSVs: python explore_ratings.py path/to/ml-32m")
+def find_data_root(arg):
+    """Find the folder holding movies.csv. Tries: the path given, ./ml-32m, ./data/ml-32m, ./data."""
+    base = Path(arg) if arg else Path(".")
+    tried = [base, base / "ml-32m", base / "data" / "ml-32m", base / "data"]
+    for c in tried:
+        if (c / "movies.csv").exists():
+            return c
+    sys.exit("Can't find movies.csv. Looked in:\n  " + "\n  ".join(str(t.resolve()) for t in tried)
+             + "\nPass the folder containing the CSVs, e.g.  python explore_ratings.py data/ml-32m")
+
+root = find_data_root(sys.argv[1] if len(sys.argv) > 1 else None)
+print(f"Using data in {root.resolve()}")
 
 movies = pd.read_csv(root / "movies.csv")
 movies["year"] = movies.title.str.extract(r"\((\d{4})\)\s*$")[0].astype(float)
@@ -195,7 +201,8 @@ show(top[top.verdict == "RECURRING"])
 print("\n-- Recurring movies by peak month")
 print(top[top.verdict == "RECURRING"].peak_month.value_counts().reindex(M).fillna(0).astype(int).to_dict())
 
-out = Path.cwd() / "seasonal_movies.csv"
+# Same place build_catalog.py writes catalog.db: ./data/ if it exists, otherwise the current folder.
+out = (Path.cwd() / "data" if (Path.cwd() / "data").is_dir() else Path.cwd()) / "seasonal_movies.csv"
 top[top.verdict == "RECURRING"].reset_index()[
     ["movieId", "title", "peak_month", "lift", "n", "peak_years", "top_year_share"]].to_csv(out, index=False)
 print(f"\nWrote {out}")
