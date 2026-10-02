@@ -13,7 +13,8 @@ export class CatalogMissingError extends Error {
       `catalog.db not found at ${file}. Copy your catalog.db to data/catalog.db, set CATALOG_DB, ` +
         `or (on Vercel) upload it to a Blob store and set BLOB_READ_WRITE_TOKEN. ` +
         `[debug: ${g.__catalogNote ?? "download step never ran"}; ` +
-        `BLOB_READ_WRITE_TOKEN is ${process.env.BLOB_READ_WRITE_TOKEN ? "set" : "NOT set"}]`,
+        `BLOB_READ_WRITE_TOKEN is ${process.env.BLOB_READ_WRITE_TOKEN ? "set" : "NOT set"}, ` +
+        `BLOB_STORE_ID is ${process.env.BLOB_STORE_ID ? "set" : "NOT set"}]`,
     );
   }
 }
@@ -70,9 +71,11 @@ async function download(): Promise<void> {
     g.__catalogNote = `file already at ${existing}`;
     return;
   }
-  if (!process.env.BLOB_READ_WRITE_TOKEN) {
-    g.__catalogNote = "download skipped: no token";
-    console.error("[catalog] BLOB_READ_WRITE_TOKEN is not set, so catalog.db can't be downloaded.");
+  // Newer Blob stores only add BLOB_STORE_ID (the SDK then authenticates with Vercel's OIDC token);
+  // older ones add BLOB_READ_WRITE_TOKEN. Either is enough to try.
+  if (!process.env.BLOB_READ_WRITE_TOKEN && !process.env.BLOB_STORE_ID) {
+    g.__catalogNote = "download skipped: no token or store id";
+    console.error("[catalog] Neither BLOB_READ_WRITE_TOKEN nor BLOB_STORE_ID is set, so catalog.db can't be downloaded.");
     return; // nothing to download from; getDb() will report the missing file
   }
 
