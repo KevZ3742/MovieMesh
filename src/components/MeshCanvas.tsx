@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef, useSyncExternalStore } from "react";
 import {
   Background,
   Controls,
@@ -10,6 +10,7 @@ import {
   useNodesState,
   useReactFlow,
   type Edge,
+  type ColorMode,
   type Node,
   type NodeMouseHandler,
 } from "@xyflow/react";
@@ -22,6 +23,18 @@ type FlowNode = Node<MeshNodeData>;
 const nodeTypes = { movie: MovieNode, person: PersonNode };
 
 type Point = { x: number; y: number };
+
+// React Flow wants to know light vs dark. The server can't know the visitor's setting, so it
+// renders "light" and the client switches right after hydrating (reading it during render would
+// make the server and client HTML differ, which is the hydration error).
+const DARK_QUERY = "(prefers-color-scheme: dark)";
+function subscribeColorMode(cb: () => void) {
+  const mq = window.matchMedia(DARK_QUERY);
+  mq.addEventListener("change", cb);
+  return () => mq.removeEventListener("change", cb);
+}
+const clientColorMode = (): ColorMode => (window.matchMedia(DARK_QUERY).matches ? "dark" : "light");
+const serverColorMode = (): ColorMode => "light";
 
 /** Fan new nodes out around `center`, away from the node it was reached from. */
 function place(center: Point, from: Point | null, count: number): Point[] {
@@ -61,6 +74,7 @@ function Mesh({ root, focus, onSelect, onTmdb, onError }: Props) {
     { id: `m:${root.movieId}`, type: "movie", position: { x: 0, y: 0 }, data: root },
   ]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
+  const colorMode = useSyncExternalStore(subscribeColorMode, clientColorMode, serverColorMode);
   const { fitView, getNodes } = useReactFlow();
   const handledFocus = useRef(0);
   const expanded = useRef(new Set<string>());
@@ -181,7 +195,7 @@ function Mesh({ root, focus, onSelect, onTmdb, onError }: Props) {
       fitViewOptions={{ padding: 0.4, maxZoom: 1 }}
       minZoom={0.2}
       maxZoom={1.5}
-      colorMode="system"
+      colorMode={colorMode}
     >
       <Background gap={28} size={1} color="var(--line)" />
       <Controls showInteractive={false} />

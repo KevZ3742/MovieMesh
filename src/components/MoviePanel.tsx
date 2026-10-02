@@ -103,9 +103,9 @@ export function MoviePanel({
           {scored.tier.label}
           {scored.score !== null && <span className="text-sm text-muted">{scored.score}/100</span>}
         </p>
-        {scored.state === "watched" && (
+        {scored.status === "watched" && (
           <p className="mt-2 text-sm text-muted">
-            You watched this{scored.rating ? ` and rated it ${scored.rating}★` : ""}. It shapes your taste match for other movies.
+            You&apos;ve watched this. The score shows how good a pick it is for a rewatch.
           </p>
         )}
         {scored.state === "unknown" && (

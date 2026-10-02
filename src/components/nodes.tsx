@@ -25,9 +25,7 @@ export function MovieNode({ data, selected }: NodeProps<Node<MeshMovieData, "mov
   const poster = imageUrl(data.posterPath, "w92");
   return (
     <div
-      className={`relative flex w-44 items-center gap-2.5 rounded-lg bg-surface p-2 text-left ${
-        scored.state === "watched" ? "opacity-70" : ""
-      }`}
+      className="relative flex w-44 items-center gap-2.5 rounded-lg bg-surface p-2 text-left"
       style={{
         border: `3px ${tier.dashed ? "dashed" : "solid"} ${color}`,
         boxShadow: selected
@@ -61,7 +59,7 @@ export function MovieNode({ data, selected }: NodeProps<Node<MeshMovieData, "mov
         <p className="line-clamp-2 text-[13px] font-medium leading-tight">{data.title}</p>
         <p className="mt-0.5 text-xs text-muted">
           {data.loading ? "Loading..." : (data.year ?? "")}
-          {!data.loading && scored.state === "watched" && scored.rating !== null && (
+          {!data.loading && scored.status === "watched" && scored.rating !== null && (
             <span className="font-semibold text-ink"> · {"★".repeat(scored.rating)}</span>
           )}
           {!data.loading && scored.score !== null && (

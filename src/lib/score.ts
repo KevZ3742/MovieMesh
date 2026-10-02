@@ -6,7 +6,7 @@ import { MONTHS, monthsUntil } from "./seasons";
 import type { Library, LibraryEntry, Movie, MovieFeatures, When } from "./types";
 
 // ---------- tiers (the rim colour) ----------
-export type TierId = "now" | "good" | "maybe" | "low" | "unknown" | "watched";
+export type TierId = "now" | "good" | "maybe" | "low" | "unknown";
 export type Tier = { id: TierId; label: string; color: string; dashed?: boolean };
 
 export const TIERS: Record<TierId, Tier> = {
@@ -15,7 +15,6 @@ export const TIERS: Record<TierId, Tier> = {
   maybe: { id: "maybe", label: "Maybe later", color: "#E3A008" },
   low: { id: "low", label: "Not now", color: "#8089A3" },
   unknown: { id: "unknown", label: "No signal yet", color: "#8089A3", dashed: true },
-  watched: { id: "watched", label: "Watched", color: "#8089A3" },
 };
 
 export const TIER_CUTOFFS = { now: 75, good: 60, maybe: 45 };
@@ -28,7 +27,7 @@ export function tierFor(score: number): Tier {
 }
 
 // ---------- factors ----------
-export type FactorKey = "season" | "taste" | "quality" | "planned";
+export type FactorKey = "season" | "taste" | "quality" | "history";
 export type Factor = {
   key: FactorKey;
   label: string;
@@ -42,9 +41,8 @@ export type Factor = {
 
 // Tune these. Only signals that apply to a movie are blended (weights are re-normalised),
 // so a movie with no seasonal pattern is graded on taste and quality alone.
-export const WEIGHTS: Record<"season" | "taste" | "quality", number> = { season: 0.3, taste: 0.4, quality: 0.2 };
-/** Points added on top when a movie is on your plan-to-watch list. */
-export const PLANNED_BONUS = 10;
+// Plan-to-watch is deliberately NOT a signal: planning a movie says nothing about whether it's a good pick.
+export const WEIGHTS: Record<FactorKey, number> = { season: 0.3, taste: 0.4, quality: 0.2, history: 0.3 };
 
 const clamp = (n: number, lo = 0, hi = 1) => Math.min(hi, Math.max(lo, n));
 const toneOf = (v: number): Factor["tone"] => (v >= 0.6 ? "good" : v < 0.35 ? "bad" : "neutral");
@@ -106,7 +104,7 @@ function qualityFactor(f: MovieFeatures): Factor | null {
   return { key: "quality", label: "Quality", value, weight: WEIGHTS.quality, reason, tone: toneOf(value) };
 }
 
-// ---------- taste (compares against what you've watched, rated and planned) ----------
+// ---------- taste (compares against movies you've watched and rated; plan-to-watch is ignored) ----------
 type Sig = { genres: string[]; tags: string[] };
 const signature = (m: Sig) => new Set([...m.tags.map((t) => `t:${t}`), ...m.genres.map((g) => `g:${g}`)]);
 
@@ -121,11 +119,10 @@ function compare(a: Set<string>, b: Set<string>) {
 /** How much a library entry says about your taste: -1 (hated it) to +1 (loved it). */
 function affinity(e: LibraryEntry) {
   if (e.rating != null) return (e.rating - 3) / 2;
-  return e.status === "watched" ? 0.2 : 0.1; // watched-but-unrated and planned are mild positives
+  return 0.2; // watched but unrated: a mild positive
 }
 
-const verb = (e: LibraryEntry) =>
-  e.rating != null ? `rated ${e.rating}★` : e.status === "planned" ? "plan to watch" : "watched";
+const verb = (e: LibraryEntry) => (e.rating != null ? `rated ${e.rating}★` : "watched");
 
 type Hit = { strength: number; entry: LibraryEntry; shared: string[] };
 
@@ -136,7 +133,7 @@ function tasteFactor(f: MovieFeatures, lib: Library): Factor | null {
   let near = 0;
   let signal = 0;
   for (const [id, entry] of Object.entries(lib)) {
-    if (Number(id) === f.movieId) continue;
+    if (Number(id) === f.movieId || entry.status !== "watched") continue;
     const a = affinity(entry);
     if (a === 0) continue; // a 3-star rating says nothing either way
     signal++;
@@ -166,13 +163,25 @@ function tasteFactor(f: MovieFeatures, lib: Library): Factor | null {
   return { key: "taste", label: "Taste", value, weight: WEIGHTS.taste, reason, tone: toneOf(value) };
 }
 
+// ---------- history (your own rating of this movie, for rewatches) ----------
+function historyFactor(entry: LibraryEntry | null): Factor | null {
+  if (entry?.status !== "watched" || entry.rating == null) return null;
+  const value = (entry.rating - 1) / 4; // 1 star -> 0, 5 stars -> 1
+  const r = entry.rating;
+  const reason =
+    r >= 4 ? `You rated it ${r}★, so it's worth a rewatch`
+    : r === 3 ? `You rated it ${r}★`
+    : `You rated it ${r}★, so probably not a rewatch`;
+  return { key: "history", label: "You", value, weight: WEIGHTS.history, reason, tone: toneOf(value) };
+}
+
 // ---------- the blend ----------
 export type Scored = {
-  state: "scored" | "unknown" | "watched";
-  /** null when watched (nothing to recommend) or when there is no signal at all. */
+  state: "scored" | "unknown";
+  /** null only when there is no signal at all. Watched movies are scored too: you can always rewatch. */
   score: number | null;
   tier: Tier;
-  /** Most influential first. Empty when watched. */
+  /** Most influential first. */
   factors: Factor[];
   status: LibraryEntry["status"] | null;
   rating: number | null;
@@ -181,20 +190,15 @@ export type Scored = {
 export function scoreMovie(f: MovieFeatures, lib: Library, now: Date): Scored {
   const entry = lib[String(f.movieId)] ?? null;
   const base = { status: entry?.status ?? null, rating: entry?.rating ?? null };
-  if (entry?.status === "watched") return { ...base, state: "watched", score: null, tier: TIERS.watched, factors: [] };
 
-  const blended = [seasonFactor(f, now), tasteFactor(f, lib), qualityFactor(f)].filter((x): x is Factor => !!x);
-  const planned = entry?.status === "planned";
-  if (!blended.length && !planned) return { ...base, state: "unknown", score: null, tier: TIERS.unknown, factors: [] };
+  const factors = [seasonFactor(f, now), tasteFactor(f, lib), qualityFactor(f), historyFactor(entry)].filter(
+    (x): x is Factor => !!x,
+  );
+  if (!factors.length) return { ...base, state: "unknown", score: null, tier: TIERS.unknown, factors: [] };
 
-  const totalWeight = blended.reduce((s, x) => s + x.weight, 0);
-  // With no other signal, a planned movie starts from a neutral 50.
-  const blend = totalWeight ? (100 * blended.reduce((s, x) => s + x.weight * x.value, 0)) / totalWeight : 50;
-  const score = Math.round(Math.min(100, blend + (planned ? PLANNED_BONUS : 0)));
-
-  const factors = [...blended];
+  const totalWeight = factors.reduce((s, x) => s + x.weight, 0);
+  const score = Math.round((100 * factors.reduce((s, x) => s + x.weight * x.value, 0)) / totalWeight);
   // Order by how far each signal pulls the score away from "meh" (0.5), in either direction.
   factors.sort((a, b) => b.weight * Math.abs(b.value - 0.5) - a.weight * Math.abs(a.value - 0.5));
-  if (planned) factors.unshift({ key: "planned", label: "Plan", value: 1, weight: 0, reason: "On your plan-to-watch list (+10)", tone: "good" });
   return { ...base, state: "scored", score, tier: tierFor(score), factors };
 }
