@@ -1,10 +1,18 @@
+import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
+import type { ReadableStream as NodeWebStream } from "node:stream/web";
 // Node's built-in SQLite (Node 22.13+). No native module to compile, so no Visual Studio / node-gyp on Windows.
 import { DatabaseSync } from "node:sqlite";
 
 export class CatalogMissingError extends Error {
   constructor(public file: string) {
-    super(`catalog.db not found at ${file}. Copy your catalog.db to data/catalog.db or set CATALOG_DB.`);
+    super(
+      `catalog.db not found at ${file}. Copy your catalog.db to data/catalog.db, set CATALOG_DB, ` +
+        `or (on Vercel) upload it to a Blob store and set BLOB_READ_WRITE_TOKEN.`,
+    );
   }
 }
 
@@ -16,11 +24,62 @@ export type Db = {
   };
 };
 
-const g = globalThis as unknown as { __catalog?: Db; __tables?: Map<string, boolean> };
+const g = globalThis as unknown as {
+  __catalog?: Db;
+  __tables?: Map<string, boolean>;
+  __catalogReady?: Promise<void>;
+};
+
+// ---------- where is the file? ----------
+
+const LOCAL_FILE = path.join(process.cwd(), "data", "catalog.db");
+// On Vercel only /tmp is writable. os.tmpdir() gives /tmp there and the normal temp folder elsewhere.
+const TMP_FILE = path.join(os.tmpdir(), "catalog.db");
+// Pathname of the file inside your Blob store (the name you gave it when uploading).
+const BLOB_PATHNAME = process.env.CATALOG_BLOB_PATH || "catalog.db";
+
+/** CATALOG_DB wins, then data/catalog.db (local dev), then the copy downloaded from Blob. */
+function catalogPath(): string {
+  if (process.env.CATALOG_DB) return process.env.CATALOG_DB;
+  if (fs.existsSync(LOCAL_FILE)) return LOCAL_FILE;
+  return TMP_FILE;
+}
+
+/**
+ * Makes sure the catalog file exists on disk. Call once at server start (see instrumentation.ts).
+ * Does nothing if the file is already there (local dev, or a warm serverless instance).
+ * Otherwise downloads it from a private Vercel Blob store into the temp folder.
+ */
+export function ensureCatalogFile(): Promise<void> {
+  g.__catalogReady ??= download().catch((err) => {
+    g.__catalogReady = undefined; // let the next call retry instead of caching the failure
+    throw err;
+  });
+  return g.__catalogReady;
+}
+
+async function download(): Promise<void> {
+  if (fs.existsSync(catalogPath())) return;
+  if (!process.env.BLOB_READ_WRITE_TOKEN) return; // nothing to download from; getDb() will report the missing file
+
+  // Imported lazily so local dev without the package/token never touches it.
+  const { get } = await import("@vercel/blob");
+  const result = await get(BLOB_PATHNAME, { access: "private" });
+  if (!result || result.statusCode !== 200 || !result.stream) {
+    throw new Error(`Could not download "${BLOB_PATHNAME}" from Vercel Blob.`);
+  }
+
+  // Write to a scratch name and rename, so a half-finished download is never opened as a database.
+  const partial = `${TMP_FILE}.${process.pid}.part`;
+  await pipeline(Readable.fromWeb(result.stream as unknown as NodeWebStream), fs.createWriteStream(partial));
+  fs.renameSync(partial, TMP_FILE);
+}
+
+// ---------- opening it ----------
 
 export function getDb(): Db {
   if (g.__catalog) return g.__catalog;
-  const file = process.env.CATALOG_DB || path.join(process.cwd(), "data", "catalog.db");
+  const file = catalogPath();
   try {
     // readOnly never creates a file, so a wrong path fails here instead of silently making an empty database.
     const raw = new DatabaseSync(file, { readOnly: true });
