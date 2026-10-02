@@ -14,6 +14,7 @@ import {
   type NodeMouseHandler,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
+import { findLinks, spotAside, spotNear } from "@/lib/links";
 import type { ExpandResponse, MeshMovieData, MeshNodeData, TmdbStatus } from "@/lib/types";
 import { MovieNode, PersonNode } from "./nodes";
 
@@ -35,8 +36,12 @@ function place(center: Point, from: Point | null, count: number): Point[] {
   });
 }
 
+/** Ask the mesh to reveal a movie: zoom to it if it's on the canvas, otherwise add it. */
+export type Focus = { data: MeshMovieData; castIds: number[]; nonce: number };
+
 type Props = {
   root: MeshMovieData;
+  focus: Focus | null;
   onSelect: (data: MeshNodeData) => void;
   onTmdb: (status: TmdbStatus) => void;
   onError: (message: string) => void;
@@ -51,12 +56,13 @@ export function MeshCanvas(props: Props) {
   );
 }
 
-function Mesh({ root, onSelect, onTmdb, onError }: Props) {
+function Mesh({ root, focus, onSelect, onTmdb, onError }: Props) {
   const [nodes, setNodes, onNodesChange] = useNodesState<FlowNode>([
     { id: `m:${root.movieId}`, type: "movie", position: { x: 0, y: 0 }, data: root },
   ]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
-  const { fitView } = useReactFlow();
+  const { fitView, getNodes } = useReactFlow();
+  const handledFocus = useRef(0);
   const expanded = useRef(new Set<string>());
   const parents = useRef(new Map<string, string>());
 
@@ -119,6 +125,39 @@ function Mesh({ root, onSelect, onTmdb, onError }: Props) {
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Reveal a movie picked from outside the canvas (e.g. My list).
+  useEffect(() => {
+    if (!focus || handledFocus.current === focus.nonce) return;
+    const t = setTimeout(() => {
+      handledFocus.current = focus.nonce;
+      const id = `m:${focus.data.movieId}`;
+      const current = getNodes() as FlowNode[];
+      const existing = current.find((n) => n.id === id);
+      let shown: MeshNodeData = existing ? existing.data : focus.data;
+
+      if (!existing) {
+        const links = findLinks(focus.data, focus.castIds, current);
+        const anchor = links.length ? current.find((n) => n.id === links[0].nodeId) : undefined;
+        const others = current.map((n) => n.position);
+        const grand = anchor ? current.find((n) => n.id === parents.current.get(anchor.id)) : undefined;
+        const position = anchor ? spotNear(anchor.position, grand?.position ?? null, others) : spotAside(others);
+        shown = { ...focus.data, via: links.length ? `Similar: ${links[0].via}` : "From your list (not linked to anything here yet)" };
+        if (anchor) parents.current.set(id, anchor.id);
+        setNodes((ns) => [...ns, { id, type: "movie", position, data: shown }]);
+        setEdges((es) => [
+          ...es,
+          ...links.map((l) => ({ id: `${l.nodeId}>${id}`, source: l.nodeId, target: id })),
+        ]);
+      }
+      setNodes((ns) => ns.map((n) => ({ ...n, selected: n.id === id })));
+      onSelect(shown);
+      const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+      // let React Flow measure the new node before zooming to it
+      window.setTimeout(() => void fitView({ nodes: [{ id }], padding: 1.2, maxZoom: 1, duration: reduce ? 0 : 500 }), 120);
+    }, 0);
+    return () => clearTimeout(t);
+  }, [focus, fitView, getNodes, onSelect, setEdges, setNodes]);
 
   const onNodeClick: NodeMouseHandler<FlowNode> = useCallback(
     (_, node) => {

@@ -71,12 +71,45 @@ export type MeshMovieData = {
   year: number | null;
   tmdbId: number | null;
   posterPath: string | null;
+  // ---- inputs to the watch score (see lib/score.ts) ----
+  genres: string[];
+  /** Most agreed-upon tags first. */
+  tags: string[];
+  avgRating: number | null;
+  nRatings: number | null;
   peakMonth: number | null;
-  /** True when the peak month is only a weak, genre-level guess (drawn with a dashed rim). */
+  /** True when the peak month is only a weak, genre-level guess. */
   weak?: boolean;
+  seasonSource: When["source"];
   via: string | null;
   loading?: boolean;
 };
+
+/** Everything the watch score needs to know about a movie. */
+export type MovieFeatures = Pick<
+  MeshMovieData,
+  "movieId" | "title" | "year" | "genres" | "tags" | "avgRating" | "nRatings" | "peakMonth" | "weak" | "seasonSource"
+>;
+
+export type Starter = MovieFeatures & { id: number };
+
+// ---- personal library (watched / plan to watch) ----
+export type WatchStatus = "watched" | "planned";
+
+export type LibraryEntry = {
+  status: WatchStatus;
+  /** 1-5 stars, only meaningful once watched. */
+  rating: number | null;
+  // Snapshot of the movie so taste matching works without re-fetching anything.
+  title: string;
+  year: number | null;
+  genres: string[];
+  tags: string[];
+  at: number;
+};
+
+/** Keyed by MovieLens movie id (as a string). */
+export type Library = Record<string, LibraryEntry>;
 
 export type MeshPersonData = {
   kind: "person";

@@ -1,5 +1,6 @@
 import { getMovie, getMoviesByTmdbIds, getSimilar } from "./catalog";
 import { getPersonMovieIds, getTmdbMovie, tmdbEnabled } from "./tmdb";
+import { featuresOf } from "./score";
 import { computeWhen } from "./when";
 import type { ExpandResponse, MeshMovieData, MovieSummary } from "./types";
 
@@ -7,18 +8,20 @@ type MovieNode = { id: string } & MeshMovieData;
 
 async function movieNode(s: MovieSummary, via: string | null): Promise<MovieNode> {
   const full = getMovie(s.id);
-  const when = full ? computeWhen(full) : null;
+  const when = full ? computeWhen(full) : { peakMonth: null, strength: "none" as const, source: "none" as const };
+  // Everything the watch score needs rides along on the node, so the client can re-score
+  // instantly when the library changes (no refetch).
+  const features = featuresOf(
+    full ?? { id: s.id, title: s.title, year: s.year, genres: s.genres, tags: [], avgRating: null, nRatings: null },
+    when,
+  );
   const tmdb = s.tmdbId ? await getTmdbMovie(s.tmdbId) : null;
   return {
+    ...features,
     id: `m:${s.id}`,
     kind: "movie",
-    movieId: s.id,
-    title: s.title,
-    year: s.year,
     tmdbId: s.tmdbId,
     posterPath: tmdb?.posterPath ?? null,
-    peakMonth: when?.peakMonth ?? null,
-    weak: when?.strength === "mild",
     via,
   };
 }

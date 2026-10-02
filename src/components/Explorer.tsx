@@ -3,28 +3,26 @@
 
 import { useCallback, useMemo, useRef, useState } from "react";
 import { imageUrl } from "@/lib/images";
-import { MONTHS, monthColor } from "@/lib/seasons";
-import type { MeshMovieData, MeshNodeData, MeshPersonData, MovieDetail, TmdbStatus } from "@/lib/types";
-import { MeshCanvas } from "./MeshCanvas";
-import { MonthStrip } from "./MonthStrip";
+import { useLibrary } from "@/lib/library";
+import { featuresOf, scoreMovie } from "@/lib/score";
+import { MONTHS } from "@/lib/seasons";
+import type { MeshMovieData, MeshNodeData, MeshPersonData, MovieDetail, Starter, TmdbStatus } from "@/lib/types";
+import { GradeLegend } from "./GradeLegend";
+import { LibraryPanel } from "./LibraryPanel";
+import { MeshCanvas, type Focus } from "./MeshCanvas";
 import { MoviePanel } from "./MoviePanel";
 import { SearchBox } from "./SearchBox";
 
-type Starter = { id: number; title: string; year: number; peakMonth: number | null; weak: boolean };
 type Selection =
   | { kind: "movie"; id: number; detail: MovieDetail | null; via: string | null; error?: string }
   | { kind: "person"; data: MeshPersonData }
   | null;
 
 const rootFrom = (d: MovieDetail): MeshMovieData => ({
+  ...featuresOf(d.movie, d.when),
   kind: "movie",
-  movieId: d.movie.id,
-  title: d.movie.title,
-  year: d.movie.year,
   tmdbId: d.movie.tmdbId,
   posterPath: d.tmdb?.posterPath ?? null,
-  peakMonth: d.when.peakMonth,
-  weak: d.when.strength === "mild",
   via: null,
 });
 
@@ -41,9 +39,16 @@ export function Explorer({ starters, initial }: { starters: Starter[]; initial: 
   const [selection, setSelection] = useState<Selection>(() =>
     initial ? { kind: "movie", id: initial.movie.id, detail: initial, via: null } : null,
   );
+  const [focus, setFocus] = useState<Focus | null>(null);
+  const focusNonce = useRef(0);
+  const [view, setView] = useState<"details" | "list">("details");
   const [notice, setNotice] = useState<string | null>(null);
   const [tmdb, setTmdb] = useState<TmdbStatus | null>(null);
   const now = useMemo(() => new Date(), []);
+  const lib = useLibrary();
+  const entries = Object.values(lib);
+  const watchedCount = entries.filter((e) => e.status === "watched").length;
+  const plannedCount = entries.length - watchedCount;
   const cache = useRef(new Map<number, MovieDetail>(initial ? [[initial.movie.id, initial]] : []));
 
   const loadDetail = useCallback(async (id: number) => {
@@ -57,6 +62,8 @@ export function Explorer({ starters, initial }: { starters: Starter[]; initial: 
   const choose = useCallback(
     async (id: number) => {
       setNotice(null);
+      setView("details");
+      setFocus(null); // a fresh mesh must not replay an old "reveal this movie" request
       try {
         const d = await loadDetail(id);
         setSelection({ kind: "movie", id, detail: d, via: null });
@@ -69,8 +76,29 @@ export function Explorer({ starters, initial }: { starters: Starter[]; initial: 
     [loadDetail],
   );
 
+  /** From My list: zoom to the movie if it's on the mesh, otherwise add it (linked if it relates to anything). */
+  const openFromList = useCallback(
+    async (id: number) => {
+      if (!root) return choose(id);
+      setNotice(null);
+      setView("details");
+      try {
+        const d = await loadDetail(id);
+        setFocus({
+          data: { ...rootFrom(d), via: "From your list" },
+          castIds: d.tmdb?.cast.map((c) => c.id) ?? [],
+          nonce: ++focusNonce.current,
+        });
+      } catch (e) {
+        setNotice(e instanceof Error ? e.message : "Couldn't load that movie.");
+      }
+    },
+    [choose, loadDetail, root],
+  );
+
   const onSelect = useCallback(
     async (data: MeshNodeData) => {
+      setView("details");
       if (data.kind === "person") {
         setSelection({ kind: "person", data });
         return;
@@ -100,16 +128,30 @@ export function Explorer({ starters, initial }: { starters: Starter[]; initial: 
       <header className="flex flex-wrap items-center gap-x-6 gap-y-2 border-b border-line bg-surface px-4 py-3">
         <h1 className="font-display text-xl font-semibold">MovieMesh</h1>
         <SearchBox onChoose={choose} />
-        <p className="ml-auto flex items-center gap-2 text-sm text-muted" suppressHydrationWarning>
-          <span aria-hidden className="h-2.5 w-2.5 rounded-full" style={{ background: monthColor(now.getMonth()) }} />
-          It&apos;s {MONTHS[now.getMonth()]}
-        </p>
+        <div className="ml-auto flex items-center gap-4">
+          <button
+            type="button"
+            aria-pressed={view === "list"}
+            onClick={() => setView((v) => (v === "list" ? "details" : "list"))}
+            className={`rounded-full border px-3 py-1.5 text-sm ${
+              view === "list" ? "border-ink bg-ink text-surface" : "border-line hover:border-line-strong"
+            }`}
+          >
+            My list
+            <span className="ml-1.5 opacity-70" suppressHydrationWarning>
+              {watchedCount}✓ · {plannedCount}+
+            </span>
+          </button>
+          <p className="text-sm text-muted" suppressHydrationWarning>
+            It&apos;s {MONTHS[now.getMonth()]}
+          </p>
+        </div>
       </header>
 
       <div className="flex flex-1 flex-col lg:grid lg:min-h-0 lg:grid-cols-[minmax(0,1fr)_400px]">
         <section aria-label="Movie mesh" className="relative h-[62dvh] border-b border-line lg:h-auto lg:border-b-0 lg:border-r">
           {root ? (
-            <MeshCanvas key={root.movieId} root={root} onSelect={onSelect} onTmdb={setTmdb} onError={setNotice} />
+            <MeshCanvas key={root.movieId} root={root} focus={focus} onSelect={onSelect} onTmdb={setTmdb} onError={setNotice} />
           ) : (
             <div className="grid h-full place-items-center p-6">
               <div className="max-w-md">
@@ -128,11 +170,7 @@ export function Explorer({ starters, initial }: { starters: Starter[]; initial: 
                         <span
                           aria-hidden
                           className="h-2.5 w-2.5 rounded-full"
-                          style={
-                            s.weak
-                              ? { border: `2px solid ${monthColor(s.peakMonth)}` }
-                              : { background: monthColor(s.peakMonth) }
-                          }
+                          style={{ background: scoreMovie(s, lib, now).tier.color }}
                         />
                         {s.title} ({s.year})
                       </button>
@@ -152,20 +190,15 @@ export function Explorer({ starters, initial }: { starters: Starter[]; initial: 
             )}
           </div>
 
-          {root && (
-            <div className="pointer-events-none absolute bottom-3 left-14 z-10 hidden w-60 rounded-md border border-line bg-surface/95 p-3 sm:block">
-              <MonthStrip all now={now} />
-              <p className="mt-2 text-xs text-muted">
-                A node&apos;s rim shows the month it&apos;s best watched. Grey means no seasonal pattern, and a dashed
-                rim is only a weak genre-level guess.
-              </p>
-            </div>
-          )}
+          {root && <GradeLegend />}
         </section>
 
-        <aside aria-label="Details" className="overflow-y-auto bg-surface p-5 lg:min-h-0">
+        <aside aria-label={view === "list" ? "My list" : "Details"} className="overflow-y-auto bg-surface p-5 lg:min-h-0">
+          {view === "list" && <LibraryPanel onOpen={(id) => void openFromList(id)} />}
+          {view === "details" && (
+            <>
           {selection?.kind === "movie" && selection.detail && (
-            <MoviePanel detail={selection.detail} now={now} via={selection.via} showTmdbNote={false} />
+            <MoviePanel key={selection.id} detail={selection.detail} now={now} via={selection.via} showTmdbNote={false} />
           )}
           {selection?.kind === "movie" && !selection.detail && !selection.error && (
             <p className="text-sm text-muted">Loading movie...</p>
@@ -190,8 +223,10 @@ export function Explorer({ starters, initial }: { starters: Starter[]; initial: 
           )}
           {!selection && (
             <p className="max-w-prose text-sm text-muted">
-              Select a movie in the mesh to see when it&apos;s best to watch, what people tag it, and who&apos;s in it.
+              Select a movie in the mesh to see its watch score and why, what people tag it, and who&apos;s in it.
             </p>
+          )}
+            </>
           )}
         </aside>
       </div>

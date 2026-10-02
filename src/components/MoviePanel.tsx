@@ -1,10 +1,15 @@
 /* eslint-disable @next/next/no-img-element */
+"use client";
+
+import { useMemo } from "react";
 import { imageUrl } from "@/lib/images";
-import { monthColor, seasonStatus } from "@/lib/seasons";
-import type { MovieDetail } from "@/lib/types";
-import { MonthStrip } from "./MonthStrip";
+import { setRating, setStatus, useLibrary } from "@/lib/library";
+import { featuresOf, scoreMovie, tierFor } from "@/lib/score";
+import type { MovieDetail, WatchStatus } from "@/lib/types";
 
 const chip = "rounded-full border border-line px-2.5 py-0.5 text-xs text-ink";
+const toggle = (on: boolean) =>
+  `rounded-full border px-3 py-1.5 text-sm ${on ? "border-ink bg-ink text-surface" : "border-line hover:border-line-strong"}`;
 
 function runtime(min: number | null) {
   if (!min) return null;
@@ -12,7 +17,7 @@ function runtime(min: number | null) {
   return h ? `${h}h ${min % 60}m` : `${min}m`;
 }
 
-/** Everything we know about one movie. Pure (no hooks), so it renders on the server and the client. */
+/** Everything we know about one movie, plus the watched/planned tracker and the watch score. */
 export function MoviePanel({
   detail,
   now,
@@ -26,8 +31,12 @@ export function MoviePanel({
   showTmdbNote?: boolean;
 }) {
   const { movie, when, tmdb, tmdbStatus } = detail;
-  const status = seasonStatus(when.peakMonth, now);
-  const color = monthColor(when.peakMonth);
+  const lib = useLibrary();
+  const features = useMemo(() => featuresOf(movie, when), [movie, when]);
+  const scored = useMemo(() => scoreMovie(features, lib, now), [features, lib, now]);
+  const color = scored.tier.color;
+  const entry = lib[String(movie.id)];
+  const toggleStatus = (st: WatchStatus) => setStatus(features, entry?.status === st ? null : st);
   const poster = imageUrl(tmdb?.posterPath ?? null, "w342");
   const meta = [movie.year, runtime(tmdb?.runtime ?? null), movie.avgRating ? `${movie.avgRating.toFixed(1)} avg rating` : null]
     .filter(Boolean);
@@ -59,19 +68,72 @@ export function MoviePanel({
         </div>
       </header>
 
-      <section aria-labelledby="when-h">
-        <h3 id="when-h" className="font-display text-base font-semibold">When to watch</h3>
+      <section aria-label="Your list" className="-mt-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <button type="button" aria-pressed={entry?.status === "watched"} onClick={() => toggleStatus("watched")} className={toggle(entry?.status === "watched")}>
+            {entry?.status === "watched" ? "✓ Watched" : "Mark as watched"}
+          </button>
+          <button type="button" aria-pressed={entry?.status === "planned"} onClick={() => toggleStatus("planned")} className={toggle(entry?.status === "planned")}>
+            {entry?.status === "planned" ? "✓ On plan-to-watch list" : "+ Plan to watch"}
+          </button>
+        </div>
+        {entry?.status === "watched" && (
+          <div className="mt-3 flex items-center gap-1" role="group" aria-label="Your rating">
+            <span className="mr-1 text-sm text-muted">Your rating (update it any time, even after a rewatch)</span>
+            {[1, 2, 3, 4, 5].map((n) => (
+              <button
+                key={n}
+                type="button"
+                aria-label={`${n} star${n > 1 ? "s" : ""}`}
+                aria-pressed={entry.rating === n}
+                onClick={() => setRating(features, n)}
+                className={`text-xl leading-none ${entry.rating !== null && n <= entry.rating ? "text-ink" : "text-line-strong"}`}
+              >
+                ★
+              </button>
+            ))}
+          </div>
+        )}
+      </section>
+
+      <section aria-labelledby="score-h">
+        <h3 id="score-h" className="font-display text-base font-semibold">Watch score</h3>
         <p className="mt-2 flex items-center gap-2 font-display text-xl">
           <span aria-hidden className="h-3 w-3 rounded-full" style={{ background: color }} />
-          {status.label}
+          {scored.tier.label}
+          {scored.score !== null && <span className="text-sm text-muted">{scored.score}/100</span>}
         </p>
-        <div className="mt-3">
-          <MonthStrip peak={when.peakMonth} now={now} />
-        </div>
-        <p className="mt-3 text-sm text-muted">
-          {when.reason}
-          {when.strength === "mild" && " This is a weak, genre-level pattern."}
-        </p>
+        {scored.state === "watched" && (
+          <p className="mt-2 text-sm text-muted">
+            You watched this{scored.rating ? ` and rated it ${scored.rating}★` : ""}. It shapes your taste match for other movies.
+          </p>
+        )}
+        {scored.state === "unknown" && (
+          <p className="mt-2 text-sm text-muted">
+            Nothing to go on yet. Mark movies you&apos;ve watched and rate them, and this will start grading.
+          </p>
+        )}
+        {scored.factors.length > 0 && (
+          <>
+            <h4 className="mt-4 text-sm font-medium">Why</h4>
+            <ul className="mt-2 space-y-2.5">
+              {scored.factors.map((f) => (
+                <li key={f.key} className="flex items-start gap-3 text-sm">
+                  <span className="mt-1 flex w-14 shrink-0 flex-col gap-1">
+                    <span className="text-[11px] font-medium uppercase tracking-wide text-muted">{f.label}</span>
+                    <span aria-hidden className="h-1.5 overflow-hidden rounded bg-line">
+                      <span className="block h-full" style={{ width: `${Math.round(f.value * 100)}%`, background: tierFor(f.value * 100).color }} />
+                    </span>
+                  </span>
+                  <span className="min-w-0 flex-1">{f.reason}</span>
+                </li>
+              ))}
+            </ul>
+            <p className="mt-3 text-xs text-muted">
+              A weighted blend of the signals above. Rating more movies sharpens the taste match.
+            </p>
+          </>
+        )}
       </section>
 
       {tmdb?.overview && <p className="max-w-prose text-sm leading-relaxed">{tmdb.overview}</p>}
