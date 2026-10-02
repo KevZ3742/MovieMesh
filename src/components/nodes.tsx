@@ -25,7 +25,7 @@ export function MovieNode({ data, selected }: NodeProps<Node<MeshMovieData, "mov
   const poster = imageUrl(data.posterPath, "w92");
   return (
     <div
-      className="relative flex w-44 items-center gap-2.5 rounded-lg bg-surface p-2 text-left"
+      className="bubble-in relative flex w-44 items-center gap-2.5 rounded-lg bg-surface p-2 text-left"
       style={{
         border: `3px ${tier.dashed ? "dashed" : "solid"} ${color}`,
         boxShadow: selected

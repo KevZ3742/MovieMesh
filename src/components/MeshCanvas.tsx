@@ -16,6 +16,7 @@ import {
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { findLinks, spotAside, spotNear } from "@/lib/links";
+import { useBubblePhysics } from "@/lib/useBubblePhysics";
 import type { ExpandResponse, MeshMovieData, MeshNodeData, TmdbStatus } from "@/lib/types";
 import { MovieNode } from "./nodes";
 
@@ -48,6 +49,9 @@ function place(center: Point, from: Point | null, count: number): Point[] {
     return { x: center.x + Math.cos(a) * radius, y: center.y + Math.sin(a) * radius };
   });
 }
+
+/** A point a little way from `a` toward `b`: where a new node starts before it springs out. */
+const nudge = (a: Point, b: Point, t = 0.1): Point => ({ x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t });
 
 /** Ask the mesh to reveal a movie: zoom to it if it's on the canvas, otherwise add it. */
 export type Focus = { data: MeshMovieData; nonce: number };
@@ -87,6 +91,17 @@ function Mesh({ root, focus, onSelect, onTmdb, onError, useTmdb }: Props) {
     window.setTimeout(() => void fitView({ padding: 0.25, maxZoom: 1, duration: reduce ? 0 : 450 }), 80);
   }, [fitView]);
 
+  // What to do with the camera once new nodes have finished springing into place. Nodes are still
+  // moving right after they're added, so framing them any earlier would aim at the wrong spots.
+  const afterSettle = useRef<(() => void) | null>(null);
+  const onSettle = useCallback(() => {
+    const run = afterSettle.current;
+    afterSettle.current = null;
+    if (run) run();
+    else fit();
+  }, [fit]);
+  const physics = useBubblePhysics<FlowNode>(setNodes, onSettle);
+
   const expand = useCallback(
     async (node: FlowNode) => {
       const id = node.id;
@@ -102,16 +117,27 @@ function Mesh({ root, focus, onSelect, onTmdb, onError, useTmdb }: Props) {
         const data = body as ExpandResponse;
         onTmdb(data.tmdb);
 
-        setNodes((ns) => {
-          const have = new Set(ns.map((n) => n.id));
-          const parent = ns.find((n) => n.id === id);
-          if (!parent) return ns;
-          const grand = ns.find((n) => n.id === parents.current.get(id));
+        const current = getNodes() as FlowNode[];
+        const parent = current.find((n) => n.id === id);
+        let launched = 0;
+        if (parent) {
+          const have = new Set(current.map((n) => n.id));
+          const grand = current.find((n) => n.id === parents.current.get(id));
           const fresh = data.nodes.filter((n) => !have.has(n.id));
           const spots = place(parent.position, grand?.position ?? null, fresh.length);
-          fresh.forEach((n) => parents.current.set(n.id, id));
-          return [...ns, ...fresh.map((n, i) => ({ id: n.id, type: "movie", position: spots[i], data: n }))];
-        });
+          afterSettle.current = null; // the latest expansion decides how the camera frames things
+          // New nodes start just off their parent and spring out to their spots.
+          const added: FlowNode[] = fresh.map((n, i) => {
+            parents.current.set(n.id, id);
+            physics.launch(n.id, spots[i], id);
+            return { id: n.id, type: "movie", position: nudge(parent.position, spots[i]), data: n };
+          });
+          launched = added.length;
+          setNodes((ns) => {
+            const ids = new Set(ns.map((n) => n.id));
+            return [...ns, ...added.filter((n) => !ids.has(n.id))];
+          });
+        }
         setEdges((es) => {
           const have = new Set(es.map((e) => e.id));
           const add = data.edges
@@ -119,7 +145,8 @@ function Mesh({ root, focus, onSelect, onTmdb, onError, useTmdb }: Props) {
             .filter((e) => !have.has(e.id) && !have.has(`${e.target}>${e.source}`));
           return [...es, ...add];
         });
-        if (data.nodes.length) fit();
+        // With new nodes the camera follows once they settle (see onSettle); otherwise frame now.
+        if (data.nodes.length && !launched) fit();
       } catch (e) {
         expanded.current.delete(id);
         onError(e instanceof Error ? e.message : "Couldn't load connections.");
@@ -127,7 +154,7 @@ function Mesh({ root, focus, onSelect, onTmdb, onError, useTmdb }: Props) {
         setLoading(false);
       }
     },
-    [fit, onError, onTmdb, setEdges, setNodes, useTmdb],
+    [fit, getNodes, onError, onTmdb, physics, setEdges, setNodes, useTmdb],
   );
 
   // Grow the first node once, as soon as the mesh appears.
@@ -146,6 +173,7 @@ function Mesh({ root, focus, onSelect, onTmdb, onError, useTmdb }: Props) {
       const current = getNodes() as FlowNode[];
       const existing = current.find((n) => n.id === id);
       let shown: MeshNodeData = existing ? existing.data : focus.data;
+      const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
       if (!existing) {
         const links = findLinks(focus.data, current);
@@ -155,20 +183,27 @@ function Mesh({ root, focus, onSelect, onTmdb, onError, useTmdb }: Props) {
         const position = anchor ? spotNear(anchor.position, grand?.position ?? null, others) : spotAside(others);
         shown = { ...focus.data, via: links.length ? `Similar: ${links[0].via}` : "From your list (not linked to anything here yet)" };
         if (anchor) parents.current.set(id, anchor.id);
-        setNodes((ns) => [...ns, { id, type: "movie", position, data: shown }]);
+        setNodes((ns) => [
+          ...ns,
+          { id, type: "movie", position: anchor ? nudge(anchor.position, position) : position, data: shown },
+        ]);
         setEdges((es) => [
           ...es,
           ...links.map((l) => ({ id: `${l.nodeId}>${id}`, source: l.nodeId, target: id })),
         ]);
+        // Zoom to it once it has finished springing into place (and nudged its neighbours aside).
+        afterSettle.current = () =>
+          void fitView({ nodes: [{ id }], padding: 1.2, maxZoom: 1, duration: reduce ? 0 : 500 });
+        physics.launch(id, position, anchor?.id ?? null);
       }
       setNodes((ns) => ns.map((n) => ({ ...n, selected: n.id === id })));
       onSelect(shown);
-      const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-      // let React Flow measure the new node before zooming to it
-      window.setTimeout(() => void fitView({ nodes: [{ id }], padding: 1.2, maxZoom: 1, duration: reduce ? 0 : 500 }), 120);
+      if (existing) {
+        window.setTimeout(() => void fitView({ nodes: [{ id }], padding: 1.2, maxZoom: 1, duration: reduce ? 0 : 500 }), 120);
+      }
     }, 0);
     return () => clearTimeout(t);
-  }, [focus, fitView, getNodes, onSelect, setEdges, setNodes]);
+  }, [focus, fitView, getNodes, onSelect, physics, setEdges, setNodes]);
 
   const onNodeClick: NodeMouseHandler<FlowNode> = useCallback(
     (_, node) => {
@@ -186,6 +221,10 @@ function Mesh({ root, focus, onSelect, onTmdb, onError, useTmdb }: Props) {
       onEdgesChange={onEdgesChange}
       nodeTypes={nodeTypes}
       onNodeClick={onNodeClick}
+      // Dragging a node pins it; everything it runs into gets pushed out of the way, live.
+      onNodeDragStart={(_, node) => physics.pin(node.id)}
+      onNodeDrag={() => physics.wake()}
+      onNodeDragStop={(_, node) => physics.unpin(node.id)}
       nodesConnectable={false}
       defaultEdgeOptions={{ type: "straight", style: { strokeWidth: 1.5 } }}
       fitView
